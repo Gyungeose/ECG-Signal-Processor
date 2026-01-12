@@ -27,7 +27,10 @@ The processing pipeline follows these engineering steps:
 ## Result
 
 ### Raw Signal (Before Processing)
-*(Insert the first plot screenshot here)*
+
+I've succesfully connected with the MIT-BIH Arrythmia database and using patient '100' as a test dummy I've converted the raw signal data into physical units (time in s and voltage in millivolts), hence these readings were produced:
+
+![Raw ECG Plot](raw_ecg.png)
 
 ### Filtered Signal (After Processing)
 *(Insert the second plot screenshot here)*
