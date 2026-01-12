@@ -1,7 +1,7 @@
 # ECG-Signal-Processor
 HELLO! This is my very first coding venture, hence I'm just punching in the dark. Nonetheless the goal here is to build:
 
-This project implements a digital signal processing (DSP) pipeline to analyze raw electrocardiogram (ECG) data. Using the MIT-BIH Arrhythmia Database, the software filters biological and environmental noise, detects QRS complexes, and calculates Heart Rate Variability (HRV)—a key metric for autonomic nervous system health.
+A project implements a digital signal processing (DSP) pipeline to analyze raw electrocardiogram (ECG) data. Using the MIT-BIH Arrhythmia Database, the software filters biological and environmental noise, detects QRS complexes, and calculates Heart Rate Variability (HRV)—a key metric for autonomic nervous system health.
 
 ## Clinical Significance
 
