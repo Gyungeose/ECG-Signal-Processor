@@ -3,9 +3,11 @@ HELLO! This is my very first coding venture, hence I'm just punching in the dark
 
 A Python-based digital signal processing tool to filter raw ECG data and analyze Heart Rate Variability (HRV) using the MIT-BIH database.
 
-**WHAT?**  A Python-based digital signal processing tool to filter raw ECG data, clean it using physics-based filters, identify the R-peaks, and performs a statistical analysis on the Heart Rate Variability (HRV) using the MIT-BIH database.
+**WHAT?**  
+A Python-based digital signal processing tool to filter raw ECG data, clean it using physics-based filters, identify the R-peaks, and performs a statistical analysis on the Heart Rate Variability (HRV) using the MIT-BIH database.
 
-**WHY?**	Raw ECG data is often full of noise (muscle tremors, breathing interference, etc.). We need clean signals. Furthermore, HRV (the variation in time between beats) is a critical biomarker for autonomic nervous system health and sudden cardiac death risk.
+**WHY?**	
+Raw ECG data is often full of noise (muscle tremors, breathing interference, etc.). We need clean signals. Furthermore, HRV (the variation in time between beats) is a critical biomarker for autonomic nervous system health and sudden cardiac death risk.
 
 **HOW?**	
 1. Signal Processing: Use the Pan-Tompkins Algorithm logic (math-heavy).\
