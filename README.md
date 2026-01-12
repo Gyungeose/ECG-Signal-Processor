@@ -27,7 +27,7 @@ The processing pipeline follows these engineering steps:
 ## Result
 
 ### Raw Signal (Before Processing)
-*(Insert your first plot screenshot here)*
+*(Insert the first plot screenshot here)*
 
 ### Filtered Signal (After Processing)
-*(Coming Soon in Phase 2)*
+*(Insert the second plot screenshot here)*
