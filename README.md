@@ -28,9 +28,12 @@ The processing pipeline follows these engineering steps:
 
 ### Raw Signal (Before Processing)
 
-I've succesfully connected with the MIT-BIH Arrythmia database and using patient '100' as a test dummy I've converted the raw signal data into physical units (time in s and voltage in millivolts), hence these readings were produced:
+I've connected with the MIT-BIH Arrythmia database and using patient '100' as a test dummy, I've converted the raw signal data into physical units (time in s and voltage in millivolts), hence these readings were produced:
 
 ![Raw ECG Plot](raw_ecg.png)
 
 ### Filtered Signal (After Processing)
-*(Insert the second plot screenshot here)*
+
+As shown in the comparative plot below, the filtered signal (blue) is successfully anchored to the isoelectric line, and the QRS complexes are highly pronounced, setting the stage for accurate R-peak detection.
+
+![Filtered ECG Plot](filtered_ecg.png)
