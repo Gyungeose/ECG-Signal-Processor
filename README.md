@@ -81,7 +81,7 @@ The filtered signal (blue) is successfully anchored to the isoelectric line and 
 
 The pipeline processes data in real time, displaying the filtered ECG with detected R-peaks (red dots), the Pan-Tompkins integrator output, and chunk processing boundaries:
 
-![Streaming ECG Plot](Image Results\ecg_analysis_plot.png)
+![Streaming ECG Plot](Image_Results/ecg_analysis_plot.png)
 
 ---
 
