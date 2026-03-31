@@ -104,6 +104,14 @@ class FilterState:
         zi = np.zeros((sos.shape[0], 2))
         return cls(sos=sos, zi=zi)
     
+    @classmethod
+    def create_display(cls, fs: float, lowcut: float = 0.5, highcut: float = 40.0, order: int = 2):
+        """Wide-band filter for display — preserves full PQRST morphology."""
+        nyq = 0.5 * fs
+        sos = butter(order, [lowcut / nyq, highcut / nyq], btype='band', output='sos')
+        zi = np.zeros((sos.shape[0], 2))
+        return cls(sos=sos, zi=zi)
+    
     def apply_chunk(self, chunk: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply filter to a chunk while preserving state.
@@ -361,11 +369,13 @@ def create_streaming_processor(fs: float, window_duration_sec: float = 3.0,
         ),
         # Two-stage filtering: High-pass (0.5 Hz) + Bandpass (5-15 Hz)
         'highpass_filter': FilterState.create_highpass(fs=fs, cutoff=0.5, order=2),
+        'display_filter': FilterState.create_display(fs=fs, lowcut=0.5, highcut=40.0),
         'bandpass_filter': FilterState.create(fs=fs, lowcut=5.0, highcut=15.0, order=2),
         'threshold_state': AdaptiveThresholdState(),
         'all_r_peaks': [],  # Global list of unique detected R-peaks (with global indices)
         'dedup_r_peaks': [],  # Used to suppress duplicate overlapping detections
         'filtered_history': [],  # Continuous stream of filtered ECG values
+        'display_history': [],  # Continuous stream of display-band ECG values
         'integrator_history': [],  # Continuous stream of integrator values
         'processed_chunks': [],  # Store processed chunks for visualization
         'fs': fs
@@ -385,6 +395,9 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray, global_chunk_idx
     
     # 1) Apply high-pass filter (0.5 Hz) to remove baseline wander
     highpass_filtered = processor['highpass_filter'].apply_chunk(chunk_centered)
+    
+    # Display path — wide-band filter preserves full PQRST morphology
+    display_filtered = processor['display_filter'].apply_chunk(highpass_filtered)
     
     # 2) Apply bandpass filter (5-15 Hz) for QRS complex isolation
     filtered = processor['bandpass_filter'].apply_chunk(highpass_filtered)
@@ -410,9 +423,11 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray, global_chunk_idx
     overlap_samples = processor['buffer'].overlap_samples
     if len(processor['filtered_history']) == 0:
         processor['filtered_history'].extend(filtered.tolist())
+        processor['display_history'].extend(display_filtered.tolist())
         processor['integrator_history'].extend(integrator.tolist())
     else:
         processor['filtered_history'].extend(filtered[overlap_samples:].tolist())
+        processor['display_history'].extend(display_filtered[overlap_samples:].tolist())
         processor['integrator_history'].extend(integrator[overlap_samples:].tolist())
 
     # Store for visualization (store all processing stages)
@@ -757,7 +772,7 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True,
                                    gridspec_kw={'height_ratios': [2.5, 1.2]})
 
-    line_ecg, = ax1.plot([], [], color='#1f77b4', linewidth=1.2, label='Filtered ECG')
+    line_ecg, = ax1.plot([], [], color='#1f77b4', linewidth=1.2, label='Display ECG (0.5-40 Hz)')
     scatter_r, = ax1.plot([], [], 'ro', markersize=6, label='R-peaks')
     line_int, = ax2.plot([], [], color='#9467bd', linewidth=1.0, label='Integrator')
 
@@ -792,14 +807,14 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     }
 
 
-def update_live_plot(plot_state: dict, fs: float, filtered_history: List[float],
+def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
                      integrator_history: List[float], r_peaks: List[int]):
     """Update the live ECG plot with new data."""
-    if len(filtered_history) == 0:
+    if len(display_history) == 0:
         return
 
-    time_values = np.arange(len(filtered_history)) / fs
-    filtered_array = np.asarray(filtered_history, dtype=float)
+    time_values = np.arange(len(display_history)) / fs
+    filtered_array = np.asarray(display_history, dtype=float)
     integrator_array = np.asarray(integrator_history, dtype=float)
 
     plot_state['line_ecg'].set_data(time_values, filtered_array)
@@ -994,7 +1009,7 @@ try:
                     update_live_plot(
                         live_plot_state,
                         fs,
-                        processor['filtered_history'],
+                        processor['display_history'],
                         processor['integrator_history'],
                         processor['all_r_peaks']
                     )
@@ -1083,9 +1098,9 @@ if len(processor['processed_chunks']) > 0:
     
     # Uncomment below to generate visualization
     # Calculate total length from the continuous streamed history
-    full_filtered = np.array(processor['filtered_history'], dtype=float)
+    full_display = np.array(processor['display_history'], dtype=float)
     full_integrator = np.array(processor['integrator_history'], dtype=float)
-    max_end_idx = len(full_filtered)
+    max_end_idx = len(full_display)
 
     print(f"\nVisualization data ready - opening plot window...")
     print(f"  Debug: max_end_idx={max_end_idx}, chunks={len(processor['processed_chunks'])}")
@@ -1113,14 +1128,14 @@ if len(processor['processed_chunks']) > 0:
             # Use only the last rolling_samples
             start_idx = max_end_idx - rolling_samples
             plot_time = time[start_idx:]
-            plot_filtered = full_filtered[start_idx:]
+            plot_filtered = full_display[start_idx:]
             plot_integrator = full_integrator[start_idx:]
             plot_title_suffix = f" (Last {rolling_window_sec}s)"
         else:
             # Show all data if less than rolling window
             start_idx = 0
             plot_time = time
-            plot_filtered = full_filtered
+            plot_filtered = full_display
             plot_integrator = full_integrator
             plot_title_suffix = ""
         
@@ -1141,7 +1156,7 @@ if len(processor['processed_chunks']) > 0:
                                              gridspec_kw={'height_ratios': [2.5, 2.5, 1.5]})
         
         # Plot 1: Raw vs Filtered Signal
-        ax1.plot(plot_time, plot_filtered, color='#1f77b4', linewidth=1.2, label='Filtered ECG (Streaming)')
+        ax1.plot(plot_time, plot_filtered, color='#1f77b4', linewidth=1.2, label='Display ECG (0.5-40 Hz)')
         if len(unique_r_peaks) > 0:
             r_peak_times = np.array(unique_r_peaks) / fs
             # Filter peaks to those within the rolling window
