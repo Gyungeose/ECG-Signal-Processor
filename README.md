@@ -325,10 +325,3 @@ Source-specific configuration (port, file path, host) is handled interactively. 
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
----
-
-## References
-
-* Pan, J. & Tompkins, W.J. (1985). *A Real-Time QRS Detection Algorithm.* IEEE Transactions on Biomedical Engineering, 32(3), 230–236.
-* MIT-BIH Arrhythmia Database — PhysioNet: https://physionet.org/content/mitdb/
-* Malik, M. (1996). *Heart Rate Variability.* Annals of Noninvasive Electrocardiology.
