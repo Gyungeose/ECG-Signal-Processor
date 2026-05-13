@@ -1,12 +1,16 @@
 import wfdb
 import os
 import time
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtWidgets, QtCore
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import butter, sosfilt, find_peaks
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional
+
+app = QtWidgets.QApplication([])
 
 # Connect to the PhysioNet MIT-BIH database
 
@@ -781,51 +785,37 @@ def compute_rmssd(r_peak_indices, fs):
 
 
 def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
-    plt.ion()
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True,
-                                   gridspec_kw={'height_ratios': [2.5, 1.2]},
-                                   facecolor='#0a0a0a')
+    win = pg.GraphicsLayoutWidget(show=True, title="ECG Monitor")
+    win.resize(800, 600)
+    win.show()
 
-    for ax in (ax1, ax2):
-        ax.set_facec    olor('#0a0a0a')
-        ax.tick_params(colors='#00ff88')
-        ax.yaxis.label.set_color('#00ff88')
-        ax.xaxis.label.set_color('#00ff88')
-        ax.title.set_color('#00ff88')
-        ax.spines[:].set_color('#1a1a1a')
-        ax.grid(True, linestyle='--', alpha=0.2, color='#00ff88')
+    plot = win.addPlot()
+    plot.setYRange(-1.5, 1.5)
+    plot.setXRange(0, 10)
+    plot.setLabel('left', 'Voltage (mV)')
+    plot.setLabel('bottom', 'Time (seconds)')
+    plot.showGrid(x=True, y=True, alpha=0.3)
+    plot.setMouseEnabled(x=False, y=False)
 
-    line_ecg, = ax1.plot([], [], color='#00ff88', linewidth=1.4, label='ECG')
-    scatter_r, = ax1.plot([], [], 'o', color='#ff4444', markersize=6, label='R-peaks')
-    cursor_line = ax1.axvline(x=0, color='#4488ff', linewidth=1.5, alpha=0.8)
-    line_int, = ax2.plot([], [], color='#9467bd', linewidth=1.0)
+    n_samples = int(fs * rolling_window_sec)
 
-    ax1.set_ylabel('Voltage (mV)', fontsize=11)
-    ax1.set_title('ECG Monitor', fontsize=12, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=9, facecolor='#0a0a0a', labelcolor='#00ff88')
-    ax2.set_xlabel('Time (seconds)', fontsize=11)
-    ax2.set_ylabel('Integrator', fontsize=11)
-
-    fig.tight_layout()
-
-    try:
-        fig.canvas.manager.set_window_title('ECG Monitor')
-    except Exception:
-        pass
-
-    plt.show(block=False)
+    line_ecg = plot.plot(pen=pg.mkPen(color='#00ff88', width=2))
+    scatter_r = pg.ScatterPlotItem(
+        size=10, 
+        pen=pg.mkPen(None), # No border for the scatter points
+        brush=pg.mkBrush('#ff4444') # Red color fill for the scatter points
+    )    
+    plot.addItem(scatter_r)
+    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color="#2057ab", width=1)) # Vertical cursor line (dark gray)
 
     return {
-        'fig': fig,
-        'ax1': ax1,
-        'ax2': ax2,
+        'win': win,
+        'ax1': plot,
         'line_ecg': line_ecg,
         'scatter_r': scatter_r,
-        'line_int': line_int,
         'cursor_line': cursor_line,
         'rolling_window_sec': rolling_window_sec,
-    }
-
+    }   
 
 def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
                      integrator_history: List[float], r_peaks: List[int]):
@@ -833,7 +823,6 @@ def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
         return
 
     filtered_array = np.asarray(display_history, dtype=float)
-    integrator_array = np.asarray(integrator_history, dtype=float)
 
     window_samples = int(plot_state['rolling_window_sec'] * fs)
     total_samples = len(filtered_array)
@@ -844,7 +833,7 @@ def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
     # Cursor position: where in the fixed window are we right now?
     cursor_pos = total_samples % window_samples
     cursor_time = (cursor_pos / window_samples) * plot_state['rolling_window_sec']
-    plot_state['cursor_line'].set_xdata([cursor_time, cursor_time])
+    plot_state['cursor_line'].setValue(cursor_time)
 
     # Rearrange the last window_samples so cursor position maps to x=0 on left
     if total_samples >= window_samples:
@@ -852,23 +841,17 @@ def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
         segment = filtered_array[-window_samples:]
         display_seg = np.roll(segment, -cursor_pos)
 
-        seg_int = integrator_array[-window_samples:]
-        display_int = np.roll(seg_int, -cursor_pos)
     else:
         # Not enough data yet — pad with NaN
         display_seg = np.full(window_samples, np.nan)
         display_seg[:total_samples] = filtered_array
-        display_int = np.full(window_samples, np.nan)
-        display_int[:total_samples] = integrator_array
 
     # Void: blank out a small region just ahead of the cursor
     void_samples = int(0.3 * fs)  # 0.3 second void
     void_start = window_samples - void_samples
     display_seg[void_start:] = np.nan
-    display_int[void_start:] = np.nan
 
-    plot_state['line_ecg'].set_data(x_fixed, display_seg)
-    plot_state['line_int'].set_data(x_fixed, display_int)
+    plot_state['line_ecg'].setData(x_fixed, display_seg)
 
     # R-peaks — only show those in the current visible window
     if len(r_peaks) > 0 and total_samples >= window_samples:
@@ -885,27 +868,13 @@ def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
                 r_x = [x_fixed[xi] for xi, _ in valid]
                 r_y = [filtered_array[p] if p < len(filtered_array) else 0.0 
                        for _, p in valid]
-                plot_state['scatter_r'].set_data(r_x, r_y)
+                plot_state['scatter_r'].setData(r_x, r_y)
             else:
-                plot_state['scatter_r'].set_data([], [])
+                plot_state['scatter_r'].setData([], [])
         else:
-            plot_state['scatter_r'].set_data([], [])
+            plot_state['scatter_r'].setData([], [])
     else:
-        plot_state['scatter_r'].set_data([], [])
-
-    # Fixed axes — no jumping
-    plot_state['ax1'].set_xlim(0, plot_state['rolling_window_sec'])
-    plot_state['ax2'].set_xlim(0, plot_state['rolling_window_sec'])
-    plot_state['ax1'].set_ylim(-2.0, 2.0)
-
-    if integrator_array.size > 0:
-        visible_int = display_int[~np.isnan(display_int)]
-        if visible_int.size > 0:
-            int_max = visible_int.max()
-            plot_state['ax2'].set_ylim(0, int_max * 1.1 + 1e-9)
-
-    plot_state['fig'].canvas.draw_idle()
-    plt.pause(0.001)
+        plot_state['scatter_r'].setData([], [])
 
 # ============================================================================
 # STREAMING DATA SOURCE SELECTION
@@ -1019,7 +988,10 @@ print(f"Data Source: {source_name}")
 print(f"Processing signal in streaming chunks...\n")
 
 # Create streaming processor
-fs = 360.0
+fs = 360.0 # Sampling frequency
+WINDOW = 10  # Window size in seconds
+n_samples = fs * WINDOW  # Number of samples in the window 
+
 processor = create_streaming_processor(fs, window_duration_sec=3.0,
                                       overlap_duration_sec=1.0)
 
@@ -1037,40 +1009,44 @@ sample_count = 0
 start_time = None
 
 try:
-    for sample in data_generator:
+    data_iter = iter(data_generator)
+        
+    def process_tick():
+        global chunk_count, sample_count, start_time
+
+        try:
+            sample = next(data_iter)
+        except StopIteration:
+            timer.stop()
+            return
+        
         sample_count += 1
         if start_time is None:
             start_time = time.time()
-        
+
         chunk = processor['buffer'].add_sample(sample)
-        
+
         if chunk is not None:
             process_streaming_chunk(processor, chunk, chunk_count)
             chunk_count += 1
-            
-            # How many seconds of signal have we processed?
-            samples_processed = chunk_count * processor['buffer'].stride_samples
-            signal_time_elapsed = samples_processed / fs
-            wall_time_elapsed = time.time() - start_time
-            
-            # Sleep if we're ahead of real time
-            if signal_time_elapsed > wall_time_elapsed:
-                time.sleep(signal_time_elapsed - wall_time_elapsed)
-            
+
             if chunk_count % 1 == 0:
                 print_threshold_diagnostics(processor, chunk_count)
 
             if live_plot_state is not None:
-                try:
-                    update_live_plot(
-                        live_plot_state,
-                        fs,
-                        processor['display_history'],
-                        processor['integrator_history'],
-                        processor['all_r_peaks']
-                    )
-                except Exception:
-                    pass
+                update_live_plot(
+                    live_plot_state, 
+                    fs, 
+                    processor['display_history'], 
+                    processor['integrator_history'], 
+                    processor['all_r_peaks']
+                )
+    timer = QtCore.QTimer()
+    timer.timeout.connect(process_tick)
+    timer.start(33)  # ~30 FPS update rate for the live plot
+
+    QtWidgets.QApplication.instance().exec()
+
         
 except KeyboardInterrupt:
     print("\n[OK] Stream interrupted by user")
