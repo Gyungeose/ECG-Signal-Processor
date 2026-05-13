@@ -1,5 +1,6 @@
 import wfdb
 import os
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import butter, sosfilt, find_peaks
@@ -15,7 +16,7 @@ def load_cardiology_data():
     # Download record '100' (a pre-recorded ECG sample) with 1500 samples (~4 seconds at 360Hz)
     record = wfdb.rdrecord('100', pn_dir='mitdb', sampto=1500)
     
-    v_signal = record.p_signal[:, 0] # Extract the voltage signal from Lead II (standard cardiac rhythm strip)
+    v_signal = record.p_signal[:, 0] / 200.0 # Extract the voltage signal from Lead II (standard cardiac rhythm strip)
     fs = record.fs # Get the sampling frequency (360 Hz = 360 measurements per second)
 
     # Converts sample indices to actual time in seconds using: Time = Sample Index / Sampling Frequency
@@ -112,6 +113,15 @@ class FilterState:
         zi = np.zeros((sos.shape[0], 2))
         return cls(sos=sos, zi=zi)
     
+    @classmethod
+    def create_notch(cls, fs: float, freq: float = 60.0, quality: float = 30.0):
+        """Notch filter to remove powerline interference (60 Hz US, 50 Hz international)."""
+        from scipy.signal import iirnotch
+        b, a = iirnotch(freq, quality, fs)
+        sos = np.array([[b[0], b[1], b[2], 1.0, a[1], a[2]]])
+        zi = np.zeros((sos.shape[0], 2))
+        return cls(sos=sos, zi=zi)
+        
     def apply_chunk(self, chunk: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply filter to a chunk while preserving state.
@@ -368,6 +378,7 @@ def create_streaming_processor(fs: float, window_duration_sec: float = 3.0,
             fs=fs
         ),
         # Two-stage filtering: High-pass (0.5 Hz) + Bandpass (5-15 Hz)
+        'notch_filter': FilterState.create_notch(fs=fs, freq=60.0),
         'highpass_filter': FilterState.create_highpass(fs=fs, cutoff=0.5, order=2),
         'display_filter': FilterState.create_display(fs=fs, lowcut=0.5, highcut=40.0),
         'bandpass_filter': FilterState.create(fs=fs, lowcut=5.0, highcut=15.0, order=2),
@@ -393,13 +404,16 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray, global_chunk_idx
     chunk_mean = np.mean(chunk)
     chunk_centered = chunk - chunk_mean
     
-    # 1) Apply high-pass filter (0.5 Hz) to remove baseline wander
-    highpass_filtered = processor['highpass_filter'].apply_chunk(chunk_centered)
+    # 1) Remove powerline interference with a notch filter before further filtering
+    chunk_notched = processor['notch_filter'].apply_chunk(chunk_centered)
+    
+    # 2) Apply high-pass filter (0.5 Hz) to remove baseline wander
+    highpass_filtered = processor['highpass_filter'].apply_chunk(chunk_notched)
     
     # Display path — wide-band filter preserves full PQRST morphology
     display_filtered = processor['display_filter'].apply_chunk(highpass_filtered)
     
-    # 2) Apply bandpass filter (5-15 Hz) for QRS complex isolation
+    # 3) Apply bandpass filter (5-15 Hz) for QRS complex isolation
     filtered = processor['bandpass_filter'].apply_chunk(highpass_filtered)
     
     # 2) Detect R-peaks using adaptive dual-threshold method
@@ -767,34 +781,39 @@ def compute_rmssd(r_peak_indices, fs):
 
 
 def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
-    """Create an interactive plot for live ECG streaming."""
     plt.ion()
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True,
-                                   gridspec_kw={'height_ratios': [2.5, 1.2]})
+                                   gridspec_kw={'height_ratios': [2.5, 1.2]},
+                                   facecolor='#0a0a0a')
 
-    line_ecg, = ax1.plot([], [], color='#1f77b4', linewidth=1.2, label='Display ECG (0.5-40 Hz)')
-    scatter_r, = ax1.plot([], [], 'ro', markersize=6, label='R-peaks')
-    line_int, = ax2.plot([], [], color='#9467bd', linewidth=1.0, label='Integrator')
+    for ax in (ax1, ax2):
+        ax.set_facec    olor('#0a0a0a')
+        ax.tick_params(colors='#00ff88')
+        ax.yaxis.label.set_color('#00ff88')
+        ax.xaxis.label.set_color('#00ff88')
+        ax.title.set_color('#00ff88')
+        ax.spines[:].set_color('#1a1a1a')
+        ax.grid(True, linestyle='--', alpha=0.2, color='#00ff88')
 
-    ax1.set_title('Real-Time ECG Stream', fontsize=12, fontweight='bold')
+    line_ecg, = ax1.plot([], [], color='#00ff88', linewidth=1.4, label='ECG')
+    scatter_r, = ax1.plot([], [], 'o', color='#ff4444', markersize=6, label='R-peaks')
+    cursor_line = ax1.axvline(x=0, color='#4488ff', linewidth=1.5, alpha=0.8)
+    line_int, = ax2.plot([], [], color='#9467bd', linewidth=1.0)
+
     ax1.set_ylabel('Voltage (mV)', fontsize=11)
-    ax1.grid(True, linestyle='--', alpha=0.5)
-    ax1.legend(loc='upper right', fontsize=9)
-
+    ax1.set_title('ECG Monitor', fontsize=12, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=9, facecolor='#0a0a0a', labelcolor='#00ff88')
     ax2.set_xlabel('Time (seconds)', fontsize=11)
-    ax2.set_ylabel('Integrator Energy', fontsize=11)
-    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.set_ylabel('Integrator', fontsize=11)
 
     fig.tight_layout()
+
     try:
-        fig.canvas.manager.set_window_title('Live ECG Stream')
+        fig.canvas.manager.set_window_title('ECG Monitor')
     except Exception:
         pass
 
-    try:
-        plt.show(block=False)
-    except Exception:
-        pass
+    plt.show(block=False)
 
     return {
         'fig': fig,
@@ -803,55 +822,90 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'line_ecg': line_ecg,
         'scatter_r': scatter_r,
         'line_int': line_int,
+        'cursor_line': cursor_line,
         'rolling_window_sec': rolling_window_sec,
     }
 
 
 def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
                      integrator_history: List[float], r_peaks: List[int]):
-    """Update the live ECG plot with new data."""
     if len(display_history) == 0:
         return
 
-    time_values = np.arange(len(display_history)) / fs
     filtered_array = np.asarray(display_history, dtype=float)
     integrator_array = np.asarray(integrator_history, dtype=float)
 
-    plot_state['line_ecg'].set_data(time_values, filtered_array)
-    plot_state['line_int'].set_data(time_values, integrator_array)
+    window_samples = int(plot_state['rolling_window_sec'] * fs)
+    total_samples = len(filtered_array)
 
-    if len(r_peaks) > 0:
-        r_times = np.asarray(sorted(r_peaks), dtype=float) / fs
-        r_values = []
-        for idx in sorted(r_peaks):
-            sample_idx = int(round(idx))
-            if 0 <= sample_idx < len(filtered_array):
-                r_values.append(filtered_array[sample_idx])
+    # Fixed x-axis: 0 to rolling_window_sec, always
+    x_fixed = np.arange(window_samples) / fs
+
+    # Cursor position: where in the fixed window are we right now?
+    cursor_pos = total_samples % window_samples
+    cursor_time = (cursor_pos / window_samples) * plot_state['rolling_window_sec']
+    plot_state['cursor_line'].set_xdata([cursor_time, cursor_time])
+
+    # Rearrange the last window_samples so cursor position maps to x=0 on left
+    if total_samples >= window_samples:
+        # Rotate the data so the oldest visible sample is on the left
+        segment = filtered_array[-window_samples:]
+        display_seg = np.roll(segment, -cursor_pos)
+
+        seg_int = integrator_array[-window_samples:]
+        display_int = np.roll(seg_int, -cursor_pos)
+    else:
+        # Not enough data yet — pad with NaN
+        display_seg = np.full(window_samples, np.nan)
+        display_seg[:total_samples] = filtered_array
+        display_int = np.full(window_samples, np.nan)
+        display_int[:total_samples] = integrator_array
+
+    # Void: blank out a small region just ahead of the cursor
+    void_samples = int(0.3 * fs)  # 0.3 second void
+    void_start = window_samples - void_samples
+    display_seg[void_start:] = np.nan
+    display_int[void_start:] = np.nan
+
+    plot_state['line_ecg'].set_data(x_fixed, display_seg)
+    plot_state['line_int'].set_data(x_fixed, display_int)
+
+    # R-peaks — only show those in the current visible window
+    if len(r_peaks) > 0 and total_samples >= window_samples:
+        window_start_idx = total_samples - window_samples
+        visible_peaks = [p for p in r_peaks if window_start_idx <= p < total_samples]
+        if visible_peaks:
+            # Map peak indices into the rotated display space
+            rotated_indices = [(p - window_start_idx - cursor_pos) % window_samples 
+                               for p in visible_peaks]
+            # Only show peaks not in the void
+            valid = [(xi, p) for xi, p in zip(rotated_indices, visible_peaks) 
+                     if xi < void_start]
+            if valid:
+                r_x = [x_fixed[xi] for xi, _ in valid]
+                r_y = [filtered_array[p] if p < len(filtered_array) else 0.0 
+                       for _, p in valid]
+                plot_state['scatter_r'].set_data(r_x, r_y)
             else:
-                r_values.append(0.0)
-        plot_state['scatter_r'].set_data(r_times, np.asarray(r_values, dtype=float))
+                plot_state['scatter_r'].set_data([], [])
+        else:
+            plot_state['scatter_r'].set_data([], [])
     else:
         plot_state['scatter_r'].set_data([], [])
 
-    x_max = time_values[-1]
-    x_min = max(0.0, x_max - plot_state['rolling_window_sec'])
-    plot_state['ax1'].set_xlim(x_min, x_max)
-    plot_state['ax2'].set_xlim(x_min, x_max)
-
-    visible_ecg = filtered_array[max(0, len(filtered_array) - int(fs * plot_state['rolling_window_sec'])):]
-    if visible_ecg.size > 0:
-        ecg_min, ecg_max = visible_ecg.min(), visible_ecg.max()
-        margin = max(0.2, (ecg_max - ecg_min) * 0.1)
-        plot_state['ax1'].set_ylim(ecg_min - margin, ecg_max + margin)
+    # Fixed axes — no jumping
+    plot_state['ax1'].set_xlim(0, plot_state['rolling_window_sec'])
+    plot_state['ax2'].set_xlim(0, plot_state['rolling_window_sec'])
+    plot_state['ax1'].set_ylim(-2.0, 2.0)
 
     if integrator_array.size > 0:
-        visible_int = integrator_array[max(0, len(integrator_array) - int(fs * plot_state['rolling_window_sec'])):]
-        int_min, int_max = visible_int.min(), visible_int.max()
-        plot_state['ax2'].set_ylim(min(0.0, int_min * 1.1), int_max * 1.1 + 1e-9)
+        visible_int = display_int[~np.isnan(display_int)]
+        if visible_int.size > 0:
+            int_max = visible_int.max()
+            plot_state['ax2'].set_ylim(0, int_max * 1.1 + 1e-9)
 
     plot_state['fig'].canvas.draw_idle()
     plt.pause(0.001)
-
 
 # ============================================================================
 # STREAMING DATA SOURCE SELECTION
@@ -986,22 +1040,24 @@ try:
     for sample in data_generator:
         sample_count += 1
         if start_time is None:
-            import time
             start_time = time.time()
         
-        # Add sample to buffer
         chunk = processor['buffer'].add_sample(sample)
         
         if chunk is not None:
-            # Process complete chunk
             process_streaming_chunk(processor, chunk, chunk_count)
             chunk_count += 1
             
-            # Real-time output
-            if chunk_count % 1 == 0:  # Print every chunk
-                elapsed = (time.time() - start_time) if start_time else 0
-                print(f"[Chunk {chunk_count}] {sample_count} samples processed | "
-                      f"{len(processor['all_r_peaks'])} R-peaks detected")
+            # How many seconds of signal have we processed?
+            samples_processed = chunk_count * processor['buffer'].stride_samples
+            signal_time_elapsed = samples_processed / fs
+            wall_time_elapsed = time.time() - start_time
+            
+            # Sleep if we're ahead of real time
+            if signal_time_elapsed > wall_time_elapsed:
+                time.sleep(signal_time_elapsed - wall_time_elapsed)
+            
+            if chunk_count % 1 == 0:
                 print_threshold_diagnostics(processor, chunk_count)
 
             if live_plot_state is not None:
@@ -1114,7 +1170,7 @@ if len(processor['processed_chunks']) > 0:
         print("  [INFO] Starting visualization generation...")
 
         # Create time array
-        time = np.arange(max_end_idx) / fs
+        time_axis = np.arange(max_end_idx) / fs
         
         # ============================================================================
         # VISUALIZATION - ROLLING WINDOW & DOWNSAMPLING
@@ -1127,14 +1183,14 @@ if len(processor['processed_chunks']) > 0:
         if max_end_idx > rolling_samples:
             # Use only the last rolling_samples
             start_idx = max_end_idx - rolling_samples
-            plot_time = time[start_idx:]
+            plot_time = time_axis[start_idx:]
             plot_filtered = full_display[start_idx:]
             plot_integrator = full_integrator[start_idx:]
             plot_title_suffix = f" (Last {rolling_window_sec}s)"
         else:
             # Show all data if less than rolling window
             start_idx = 0
-            plot_time = time
+            plot_time = time_axis
             plot_filtered = full_display
             plot_integrator = full_integrator
             plot_title_suffix = ""
