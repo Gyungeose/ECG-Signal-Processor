@@ -791,22 +791,22 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
 
     plot = win.addPlot()
     plot.setYRange(-1.5, 1.5)
-    plot.setXRange(0, 10)
+    plot.setXRange(0, rolling_window_sec)
     plot.setLabel('left', 'Voltage (mV)')
     plot.setLabel('bottom', 'Time (seconds)')
     plot.showGrid(x=True, y=True, alpha=0.3)
     plot.setMouseEnabled(x=False, y=False)
 
-    n_samples = int(fs * rolling_window_sec)
+    window_samples = int(fs * rolling_window_sec)
 
     line_ecg = plot.plot(pen=pg.mkPen(color='#00ff88', width=2))
     scatter_r = pg.ScatterPlotItem(
-        size=10, 
-        pen=pg.mkPen(None), # No border for the scatter points
-        brush=pg.mkBrush('#ff4444') # Red color fill for the scatter points
-    )    
+        size=10,
+        pen=pg.mkPen(None),
+        brush=pg.mkBrush('#ff4444')
+    )
     plot.addItem(scatter_r)
-    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color="#2057ab", width=1)) # Vertical cursor line (dark gray)
+    cursor_line = plot.addLine(x=rolling_window_sec, pen=pg.mkPen(color="#2057ab", width=1))
 
     return {
         'win': win,
@@ -815,66 +815,62 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'scatter_r': scatter_r,
         'cursor_line': cursor_line,
         'rolling_window_sec': rolling_window_sec,
-    }   
+        'window_samples': window_samples,
+        'x_fixed': np.arange(window_samples, dtype=float) / fs,
+        'ecg_buffer': np.full(window_samples, np.nan, dtype=float),
+        'write_pos': 0,
+        'filled_samples': 0,
+    }
 
-def update_live_plot(plot_state: dict, fs: float, display_history: List[float],
-                     integrator_history: List[float], r_peaks: List[int]):
-    if len(display_history) == 0:
+
+def append_plot_sample(plot_state: dict, sample: float):
+    pos = plot_state['write_pos']
+    plot_state['ecg_buffer'][pos] = sample
+    plot_state['write_pos'] = (pos + 1) % plot_state['window_samples']
+    plot_state['filled_samples'] = min(plot_state['filled_samples'] + 1,
+                                      plot_state['window_samples'])
+
+
+def get_plot_segment(plot_state: dict, total_samples: int):
+    window_samples = plot_state['window_samples']
+    filled = plot_state['filled_samples']
+    if filled == 0:
+        return None, None
+
+    if filled < window_samples:
+        display_seg = np.full(window_samples, np.nan, dtype=float)
+        display_seg[:filled] = plot_state['ecg_buffer'][:filled]
+        window_start_idx = 0
+    else:
+        display_seg = np.roll(plot_state['ecg_buffer'], -plot_state['write_pos'])
+        window_start_idx = total_samples - window_samples
+
+    return display_seg, window_start_idx
+
+def update_live_plot(plot_state: dict, fs: float, total_samples: int,
+                     r_peaks: List[int]):
+    display_seg, window_start_idx = get_plot_segment(plot_state, total_samples)
+    if display_seg is None:
         return
 
-    filtered_array = np.asarray(display_history, dtype=float)
+    void_samples = int(0.3 * fs)
+    if void_samples < plot_state['window_samples']:
+        display_seg[-void_samples:] = np.nan
 
-    window_samples = int(plot_state['rolling_window_sec'] * fs)
-    total_samples = len(filtered_array)
+    plot_state['line_ecg'].setData(plot_state['x_fixed'], display_seg)
+    current_time = min(plot_state['filled_samples'], plot_state['window_samples']) / fs
+    if plot_state['filled_samples'] >= plot_state['window_samples']:
+        current_time = plot_state['rolling_window_sec']
+    plot_state['cursor_line'].setValue(current_time)
 
-    # Fixed x-axis: 0 to rolling_window_sec, always
-    x_fixed = np.arange(window_samples) / fs
-
-    # Cursor position: where in the fixed window are we right now?
-    cursor_pos = total_samples % window_samples
-    cursor_time = (cursor_pos / window_samples) * plot_state['rolling_window_sec']
-    plot_state['cursor_line'].setValue(cursor_time)
-
-    # Rearrange the last window_samples so cursor position maps to x=0 on left
-    if total_samples >= window_samples:
-        # Rotate the data so the oldest visible sample is on the left
-        segment = filtered_array[-window_samples:]
-        display_seg = np.roll(segment, -cursor_pos)
-
-    else:
-        # Not enough data yet — pad with NaN
-        display_seg = np.full(window_samples, np.nan)
-        display_seg[:total_samples] = filtered_array
-
-    # Void: blank out a small region just ahead of the cursor
-    void_samples = int(0.3 * fs)  # 0.3 second void
-    void_start = window_samples - void_samples
-    display_seg[void_start:] = np.nan
-
-    plot_state['line_ecg'].setData(x_fixed, display_seg)
-
-    # R-peaks — only show those in the current visible window
-    if len(r_peaks) > 0 and total_samples >= window_samples:
-        window_start_idx = total_samples - window_samples
-        visible_peaks = [p for p in r_peaks if window_start_idx <= p < total_samples]
-        if visible_peaks:
-            # Map peak indices into the rotated display space
-            rotated_indices = [(p - window_start_idx - cursor_pos) % window_samples 
-                               for p in visible_peaks]
-            # Only show peaks not in the void
-            valid = [(xi, p) for xi, p in zip(rotated_indices, visible_peaks) 
-                     if xi < void_start]
-            if valid:
-                r_x = [x_fixed[xi] for xi, _ in valid]
-                r_y = [filtered_array[p] if p < len(filtered_array) else 0.0 
-                       for _, p in valid]
-                plot_state['scatter_r'].setData(r_x, r_y)
-            else:
-                plot_state['scatter_r'].setData([], [])
-        else:
-            plot_state['scatter_r'].setData([], [])
-    else:
+    visible_peaks = [p for p in r_peaks if window_start_idx <= p < total_samples]
+    if not visible_peaks:
         plot_state['scatter_r'].setData([], [])
+        return
+
+    r_x = [(p - window_start_idx) / fs for p in visible_peaks]
+    r_y = [display_seg[p - window_start_idx] for p in visible_peaks]
+    plot_state['scatter_r'].setData(r_x, r_y)
 
 # ============================================================================
 # STREAMING DATA SOURCE SELECTION
@@ -1012,35 +1008,36 @@ try:
     data_iter = iter(data_generator)
         
     def process_tick():
-        global chunk_count, sample_count, start_time
+        global sample_count, chunk_count, start_time
 
-        try:
-            sample = next(data_iter)
-        except StopIteration:
-            timer.stop()
-            return
-        
-        sample_count += 1
-        if start_time is None:
-            start_time = time.time()
+        for _ in range(12):  # process 12 samples per tick ≈ real time at 360Hz
+            try:
+                sample = next(data_iter)
+            except StopIteration:
+                timer.stop()
+                return
 
-        chunk = processor['buffer'].add_sample(sample)
-
-        if chunk is not None:
-            process_streaming_chunk(processor, chunk, chunk_count)
-            chunk_count += 1
-
-            if chunk_count % 1 == 0:
-                print_threshold_diagnostics(processor, chunk_count)
+            sample_count += 1
+            if start_time is None:
+                start_time = time.time()
 
             if live_plot_state is not None:
-                update_live_plot(
-                    live_plot_state, 
-                    fs, 
-                    processor['display_history'], 
-                    processor['integrator_history'], 
-                    processor['all_r_peaks']
-                )
+                append_plot_sample(live_plot_state, sample)
+
+            chunk = processor['buffer'].add_sample(sample)
+
+            if chunk is not None:
+                process_streaming_chunk(processor, chunk, chunk_count)
+                chunk_count += 1
+
+        if live_plot_state is not None:
+            update_live_plot(
+                live_plot_state,
+                fs,
+                sample_count,
+                processor['all_r_peaks']
+            )
+
     timer = QtCore.QTimer()
     timer.timeout.connect(process_tick)
     timer.start(33)  # ~30 FPS update rate for the live plot
