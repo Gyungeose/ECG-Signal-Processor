@@ -1,8 +1,7 @@
 import wfdb
 import os
+import sys
 import time
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets, QtCore
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import butter, sosfilt, find_peaks
@@ -10,7 +9,21 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional
 
-app = QtWidgets.QApplication([])
+try:
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtWidgets, QtCore
+    HAS_PYQTGRAPH = True
+except ModuleNotFoundError:
+    pg = None
+    QtWidgets = None
+    QtCore = None
+    HAS_PYQTGRAPH = False
+    print("[WARN] pyqtgraph is not installed; live GUI mode is disabled.")
+    print("[INFO] Install it with: pip install pyqtgraph")
+
+app = None
+if HAS_PYQTGRAPH:
+    app = QtWidgets.QApplication([])
 
 # Connect to the PhysioNet MIT-BIH database
 
@@ -785,17 +798,47 @@ def compute_rmssd(r_peak_indices, fs):
 
 
 def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
-    win = pg.GraphicsLayoutWidget(show=True, title="ECG Monitor")
+    win = pg.GraphicsLayoutWidget(show=True, title="ECG Continuous Sweep Monitor")
     win.resize(800, 600)
+    win.setWindowTitle("ECG Continuous Sweep Monitor")
+    if hasattr(QtCore, 'Qt'):
+        win.setWindowFlags(win.windowFlags() | QtCore.Qt.Window)
+        win.setWindowState(win.windowState() & ~QtCore.Qt.WindowMinimized)
     win.show()
+    win.raise_()
+    win.activateWindow()
+    if hasattr(QtWidgets.QApplication, 'setActiveWindow'):
+        QtWidgets.QApplication.setActiveWindow(win)
+    if hasattr(win, 'showNormal'):
+        win.showNormal()
+    app.processEvents()
 
     plot = win.addPlot()
-    plot.setYRange(-1.5, 1.5)
+    plot.setYRange(-2.0, 2.0)
     plot.setXRange(0, rolling_window_sec)
     plot.setLabel('left', 'Voltage (mV)')
     plot.setLabel('bottom', 'Time (seconds)')
-    plot.showGrid(x=True, y=True, alpha=0.3)
+    plot.showGrid(x=True, y=True, alpha=0.5)
     plot.setMouseEnabled(x=False, y=False)
+
+    # Set up ECG-standard grid: 0.04s per small square, 0.2s per large square
+    # X-axis: labels every 1s, grid lines every 0.04s (minor) and 0.2s (major)
+    x_labels = np.arange(0, rolling_window_sec + 1.0, 1.0)  # Labels every 1s
+    x_minor_grid = np.arange(0, rolling_window_sec + 0.04, 0.04)  # All grid positions
+    
+    # Y-axis: labels every 0.5mV, grid lines every 0.1mV
+    y_labels = np.arange(-2.0, 2.5, 0.5)  # Labels every 0.5mV
+    y_minor_grid = np.arange(-2.0, 2.1, 0.1)  # All grid positions
+    
+    # Set ticks: only two levels to avoid conflicts
+    plot.getAxis('bottom').setTicks([
+        [(pos, f'{int(pos)}') for pos in x_labels],  # Labeled major ticks
+        [(pos, '') for pos in x_minor_grid if pos % 1.0 != 0]  # Minor ticks (exclude labeled positions)
+    ])
+    plot.getAxis('left').setTicks([
+        [(pos, f'{pos:.1f}') for pos in y_labels],  # Labeled major ticks
+        [(pos, '') for pos in y_minor_grid if abs(pos % 0.5) > 0.01]  # Minor ticks (exclude labeled positions)
+    ])
 
     window_samples = int(fs * rolling_window_sec)
 
@@ -806,71 +849,110 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         brush=pg.mkBrush('#ff4444')
     )
     plot.addItem(scatter_r)
-    cursor_line = plot.addLine(x=rolling_window_sec, pen=pg.mkPen(color="#2057ab", width=1))
+    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color="#00aaff", width=2))
+    cursor_line.setVisible(False)
+
+    gap_region = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False)
+    gap_region.setPen(pg.mkPen(None))
+    gap_region.setZValue(-10)
+    plot.addItem(gap_region)
+
+    gap_region_wrap = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False)
+    gap_region_wrap.setPen(pg.mkPen(None))
+    gap_region_wrap.setZValue(-10)
+    plot.addItem(gap_region_wrap)
 
     return {
         'win': win,
-        'ax1': plot,
         'line_ecg': line_ecg,
         'scatter_r': scatter_r,
         'cursor_line': cursor_line,
+        'gap_region': gap_region,
+        'gap_region_wrap': gap_region_wrap,
         'rolling_window_sec': rolling_window_sec,
         'window_samples': window_samples,
         'x_fixed': np.arange(window_samples, dtype=float) / fs,
-        'ecg_buffer': np.full(window_samples, np.nan, dtype=float),
+        'sweep_buffer': np.full(window_samples, np.nan, dtype=float),
         'write_pos': 0,
-        'filled_samples': 0,
+        'void_gap_length': 30,
+        'r_peaks': [],  # Store R-peaks for the current sweep cycle
     }
 
 
 def append_plot_sample(plot_state: dict, sample: float):
+    """Add sample to circular sweep buffer with void gap in front of cursor."""
     pos = plot_state['write_pos']
-    plot_state['ecg_buffer'][pos] = sample
-    plot_state['write_pos'] = (pos + 1) % plot_state['window_samples']
-    plot_state['filled_samples'] = min(plot_state['filled_samples'] + 1,
-                                      plot_state['window_samples'])
+    window_samples = plot_state['window_samples']
+    
+    # Write new sample first
+    plot_state['sweep_buffer'][pos] = sample
+    
+    # Create void gap in front of cursor (ahead of current position)
+    void_gap_length = plot_state.get('void_gap_length', 30)
+    
+    for i in range(1, void_gap_length + 1):
+        void_pos = (pos + i) % window_samples
+        plot_state['sweep_buffer'][void_pos] = np.nan
+    
+    # Move to next position (circular)
+    plot_state['write_pos'] = (pos + 1) % window_samples
 
 
 def get_plot_segment(plot_state: dict, total_samples: int):
-    window_samples = plot_state['window_samples']
-    filled = plot_state['filled_samples']
-    if filled == 0:
-        return None, None
-
-    if filled < window_samples:
-        display_seg = np.full(window_samples, np.nan, dtype=float)
-        display_seg[:filled] = plot_state['ecg_buffer'][:filled]
-        window_start_idx = 0
-    else:
-        display_seg = np.roll(plot_state['ecg_buffer'], -plot_state['write_pos'])
-        window_start_idx = total_samples - window_samples
-
+    """Get circular sweep buffer data for continuous display."""
+    # For sweep display, just return the buffer as-is
+    # The cursor will show where new data is being written
+    display_seg = plot_state['sweep_buffer'].copy()
+    window_start_idx = total_samples - plot_state['window_samples']
+    
     return display_seg, window_start_idx
 
 def update_live_plot(plot_state: dict, fs: float, total_samples: int,
                      r_peaks: List[int]):
+    """Update continuous sweep display."""
     display_seg, window_start_idx = get_plot_segment(plot_state, total_samples)
     if display_seg is None:
         return
 
-    void_samples = int(0.3 * fs)
-    if void_samples < plot_state['window_samples']:
-        display_seg[-void_samples:] = np.nan
-
+    # Update ECG trace
     plot_state['line_ecg'].setData(plot_state['x_fixed'], display_seg)
-    current_time = min(plot_state['filled_samples'], plot_state['window_samples']) / fs
-    if plot_state['filled_samples'] >= plot_state['window_samples']:
-        current_time = plot_state['rolling_window_sec']
-    plot_state['cursor_line'].setValue(current_time)
+    plot_state['line_ecg'].update()  # Force plot update
+    
+    # Update cursor position - moves continuously across the screen
+    cursor_x = plot_state['write_pos'] / fs
+    plot_state['cursor_line'].setValue(cursor_x)
 
-    visible_peaks = [p for p in r_peaks if window_start_idx <= p < total_samples]
+    # Highlight the upcoming blank gap region in front of the cursor
+    gap_width = plot_state.get('void_gap_length', 30) / fs
+    gap_start = cursor_x
+    gap_end = cursor_x + gap_width
+    x_max = plot_state['rolling_window_sec']
+
+    if gap_end <= x_max:
+        plot_state['gap_region'].setRegion((gap_start, gap_end))
+        plot_state['gap_region_wrap'].setRegion((0, 0))
+    else:
+        plot_state['gap_region'].setRegion((gap_start, x_max))
+        plot_state['gap_region_wrap'].setRegion((0, gap_end - x_max))
+
+    # Update R-peak markers - show recent peaks in the buffer
+    visible_peaks = [p for p in r_peaks if p >= window_start_idx]
     if not visible_peaks:
         plot_state['scatter_r'].setData([], [])
         return
-
-    r_x = [(p - window_start_idx) / fs for p in visible_peaks]
-    r_y = [display_seg[p - window_start_idx] for p in visible_peaks]
+    
+    # For sweep display, show peaks at their buffer positions
+    r_x = []
+    r_y = []
+    for p in visible_peaks[-15:]:  # Show last 15 peaks
+        buffer_idx = (p - window_start_idx) % plot_state['window_samples']
+        
+        if buffer_idx < len(display_seg) and not np.isnan(display_seg[buffer_idx]):
+            r_x.append(buffer_idx / fs)
+            r_y.append(display_seg[buffer_idx])
+    
     plot_state['scatter_r'].setData(r_x, r_y)
+    plot_state['scatter_r'].update()  # Force scatter update
 
 # ============================================================================
 # STREAMING DATA SOURCE SELECTION
@@ -994,11 +1076,13 @@ processor = create_streaming_processor(fs, window_duration_sec=3.0,
 # Try to show a live plot when a display is available
 has_display = bool(os.environ.get('DISPLAY', '')) or os.name == 'nt'
 live_plot_state = None
-if has_display:
+if has_display and HAS_PYQTGRAPH:
     try:
         live_plot_state = setup_live_plot(fs, rolling_window_sec=10.0)
     except Exception:
         live_plot_state = None
+elif has_display and not HAS_PYQTGRAPH:
+    print("[WARN] Display detected but pyqtgraph is unavailable, skipping live plot setup.")
 
 chunk_count = 0
 sample_count = 0
