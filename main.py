@@ -13,13 +13,12 @@ try:
     import pyqtgraph as pg
     from pyqtgraph.Qt import QtWidgets, QtCore
     HAS_PYQTGRAPH = True
-except ModuleNotFoundError:
+except ImportError:
     pg = None
     QtWidgets = None
     QtCore = None
     HAS_PYQTGRAPH = False
-    print("[WARN] pyqtgraph is not installed; live GUI mode is disabled.")
-    print("[INFO] Install it with: pip install pyqtgraph")
+    print("[WARN] pyqtgraph or Qt backend unavailable; live GUI mode is disabled.")
 
 app = None
 if HAS_PYQTGRAPH:
@@ -801,16 +800,7 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     win = pg.GraphicsLayoutWidget(show=True, title="ECG Continuous Sweep Monitor")
     win.resize(800, 600)
     win.setWindowTitle("ECG Continuous Sweep Monitor")
-    if hasattr(QtCore, 'Qt'):
-        win.setWindowFlags(win.windowFlags() | QtCore.Qt.Window)
-        win.setWindowState(win.windowState() & ~QtCore.Qt.WindowMinimized)
     win.show()
-    win.raise_()
-    win.activateWindow()
-    if hasattr(QtWidgets.QApplication, 'setActiveWindow'):
-        QtWidgets.QApplication.setActiveWindow(win)
-    if hasattr(win, 'showNormal'):
-        win.showNormal()
     app.processEvents()
 
     plot = win.addPlot()
@@ -852,13 +842,11 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     cursor_line = plot.addLine(x=0, pen=pg.mkPen(color="#00aaff", width=2))
     cursor_line.setVisible(False)
 
-    gap_region = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False)
-    gap_region.setPen(pg.mkPen(None))
+    gap_region = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None))
     gap_region.setZValue(-10)
     plot.addItem(gap_region)
 
-    gap_region_wrap = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False)
-    gap_region_wrap.setPen(pg.mkPen(None))
+    gap_region_wrap = pg.LinearRegionItem([0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None))
     gap_region_wrap.setZValue(-10)
     plot.addItem(gap_region_wrap)
 
@@ -874,7 +862,7 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'x_fixed': np.arange(window_samples, dtype=float) / fs,
         'sweep_buffer': np.full(window_samples, np.nan, dtype=float),
         'write_pos': 0,
-        'void_gap_length': 30,
+        'void_gap_length': 80,
         'r_peaks': [],  # Store R-peaks for the current sweep cycle
     }
 
@@ -1079,7 +1067,10 @@ live_plot_state = None
 if has_display and HAS_PYQTGRAPH:
     try:
         live_plot_state = setup_live_plot(fs, rolling_window_sec=10.0)
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"[ERR] Live plot setup failed: {e}")
+        traceback.print_exc()
         live_plot_state = None
 elif has_display and not HAS_PYQTGRAPH:
     print("[WARN] Display detected but pyqtgraph is unavailable, skipping live plot setup.")
@@ -1093,34 +1084,29 @@ try:
         
     def process_tick():
         global sample_count, chunk_count, start_time
-
-        for _ in range(12):  # process 12 samples per tick ≈ real time at 360Hz
-            try:
-                sample = next(data_iter)
-            except StopIteration:
-                timer.stop()
-                return
-
-            sample_count += 1
-            if start_time is None:
-                start_time = time.time()
-
+        try:
+            for _ in range(6):
+                try:
+                    sample = next(data_iter)
+                except StopIteration:
+                    timer.stop()
+                    return
+                sample_count += 1
+                if start_time is None:
+                    start_time = time.time()
+                if live_plot_state is not None:
+                    append_plot_sample(live_plot_state, sample)
+                chunk = processor['buffer'].add_sample(sample)
+                if chunk is not None:
+                    process_streaming_chunk(processor, chunk, chunk_count)
+                    chunk_count += 1
             if live_plot_state is not None:
-                append_plot_sample(live_plot_state, sample)
-
-            chunk = processor['buffer'].add_sample(sample)
-
-            if chunk is not None:
-                process_streaming_chunk(processor, chunk, chunk_count)
-                chunk_count += 1
-
-        if live_plot_state is not None:
-            update_live_plot(
-                live_plot_state,
-                fs,
-                sample_count,
-                processor['all_r_peaks']
-            )
+                update_live_plot(live_plot_state, fs, sample_count, processor['all_r_peaks'])
+        except Exception as e:
+            import traceback
+            print(f"[ERR] process_tick crashed: {e}")
+            traceback.print_exc()
+            timer.stop()
 
     timer = QtCore.QTimer()
     timer.timeout.connect(process_tick)

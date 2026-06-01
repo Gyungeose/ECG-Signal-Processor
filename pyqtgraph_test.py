@@ -8,7 +8,7 @@ app = QtWidgets.QApplication([])
 
 # Create the main window
 
-win = pg.GraphicsLayoutWidget(show=True, title="ECG Test")
+win = pg.GraphicsLayoutWidget(show=True, title="PyQtGraph Test")
 win.resize(800, 400)
 win.show()
 
