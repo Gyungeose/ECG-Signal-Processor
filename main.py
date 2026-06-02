@@ -932,12 +932,25 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
     # For sweep display, show peaks at their buffer positions
     r_x = []
     r_y = []
-    for p in visible_peaks[-15:]:  # Show last 15 peaks
-        buffer_idx = (p - window_start_idx) % plot_state['window_samples']
-        
-        if buffer_idx < len(display_seg) and not np.isnan(display_seg[buffer_idx]):
-            r_x.append(buffer_idx / fs)
-            r_y.append(display_seg[buffer_idx])
+    for p in visible_peaks[-15:]:
+        buffer_idx = (plot_state['write_pos'] + p - total_samples) % plot_state['window_samples']
+    
+        # Search ±15 samples around detected index for local maximum
+        # This corrects for the small offset between bandpass detection
+        # signal and wide-band display signal
+        search_radius = 15
+        best_idx = buffer_idx
+        best_val = -np.inf
+    
+        for offset in range(-search_radius, search_radius + 1):
+            idx = (buffer_idx + offset) % plot_state['window_samples']
+            if not np.isnan(display_seg[idx]) and display_seg[idx] > best_val:
+                best_val = display_seg[idx]
+                best_idx = idx
+    
+        if not np.isnan(display_seg[best_idx]):
+            r_x.append(best_idx / fs)
+            r_y.append(display_seg[best_idx])
     
     plot_state['scatter_r'].setData(r_x, r_y)
     plot_state['scatter_r'].update()  # Force scatter update
