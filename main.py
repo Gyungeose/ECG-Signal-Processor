@@ -798,12 +798,29 @@ def compute_rmssd(r_peak_indices, fs):
 
 def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     win = pg.GraphicsLayoutWidget(show=True, title="ECG Continuous Sweep Monitor")
-    win.resize(800, 600)
+    win.resize(1100, 600)
     win.setWindowTitle("ECG Continuous Sweep Monitor")
     win.show()
     app.processEvents()
 
-    plot = win.addPlot()
+    # Lock ECG plot to left column and set column widths
+    win.ci.layout.setColumnStretchFactor(0, 4)  # ECG takes 4x the space
+    win.ci.layout.setColumnStretchFactor(1, 1)  # metrics panel takes 1x
+
+    # Metrics panel in right column
+    metrics_layout = win.addLayout(row=0, col=1)
+
+    metrics_layout.addLabel('HR', row=0, col=0, color='#888888', size='12pt')
+    hr_value = metrics_layout.addLabel('--', row=1, col=0, color='#00ff00', size='42pt', bold=True)
+    metrics_layout.addLabel('bpm', row=2, col=0, color='#888888', size='10pt')
+
+    metrics_layout.addLabel('', row=3, col=0)  # spacer
+
+    metrics_layout.addLabel('RMSSD', row=4, col=0, color='#888888', size='12pt')
+    rmssd_value = metrics_layout.addLabel('--', row=5, col=0, color='#00aaff', size='32pt', bold=True)
+    metrics_layout.addLabel('ms', row=6, col=0, color='#888888', size='10pt')
+
+    plot = win.addPlot(row=0, col=0)
     plot.setYRange(-2.0, 2.0)
     plot.setXRange(0, rolling_window_sec)
     plot.setLabel('left', 'Voltage (mV)')
@@ -864,6 +881,8 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'write_pos': 0,
         'void_gap_length': 80,
         'r_peaks': [],  # Store R-peaks for the current sweep cycle
+        'hr_value': hr_value,   
+        'rmssd_value': rmssd_value
     }
 
 
@@ -952,6 +971,31 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
             r_x.append(best_idx / fs)
             r_y.append(display_seg[best_idx])
     
+    # Update HR and RMSSD from last 8 beats only
+    if len(r_peaks) >= 2:
+        recent_peaks = np.array(r_peaks[-9:])  # last 9 peaks = last 8 intervals
+        rr_intervals_ms = np.diff(recent_peaks / fs) * 1000.0
+
+        # Heart rate from average of last 8 RR intervals
+        avg_rr = np.mean(rr_intervals_ms)
+        hr = int(round(60000.0 / avg_rr)) if avg_rr > 0 else 0
+
+        # Color code HR: green=normal, yellow=warning, red=danger
+        if 60 <= hr <= 100:
+            hr_color = '#00ff00'
+        elif 40 <= hr < 60 or 100 < hr <= 130:
+            hr_color = '#ffff00'
+        else:
+            hr_color = '#ff4444'
+
+        plot_state['hr_value'].setText(str(hr), color=hr_color, size='42pt', bold=True)
+
+        # RMSSD from last 8 intervals
+        if len(rr_intervals_ms) >= 2:
+            successive_diffs = np.diff(rr_intervals_ms)
+            rmssd = float(np.sqrt(np.mean(successive_diffs ** 2)))
+            plot_state['rmssd_value'].setText(f'{rmssd:.1f}', color='#00aaff', size='32pt', bold=True)
+
     plot_state['scatter_r'].setData(r_x, r_y)
     plot_state['scatter_r'].update()  # Force scatter update
 
