@@ -817,7 +817,7 @@ def detect_afib(r_peaks: list, fs: float,
     recent_peaks = np.array(r_peaks[-(min_peaks + 1):])
     rr_ms = np.diff(recent_peaks / fs) * 1000.0
 
-    # Coefficient of variation: std / mean
+    # Coefficient of variation: std / mean. RMSSD is not normalised for heart rate. A fast heart naturally has smaller RR intervals and smaller absolute differences. CV fixes this so it doesn't matter whether the heart is fast or slow.
     mean_rr = np.mean(rr_ms)
     if mean_rr == 0:
         return result
@@ -838,11 +838,11 @@ def detect_afib(r_peaks: list, fs: float,
         result['detected'] = True
         # Confidence based on how far above threshold
         if cv > cv_threshold * 1.5 and rmssd > rmssd_threshold * 1.5:
-            result['confidence'] = 'high'
+            result['confidence'] = 'high'   # Both metrics way above threshold
         elif cv > cv_threshold * 1.2:
-            result['confidence'] = 'medium'
+            result['confidence'] = 'medium' # Moderately above
         else:
-            result['confidence'] = 'low'
+            result['confidence'] = 'low'    # Just barely triggered
 
     return result
 
@@ -944,6 +944,7 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'rmssd_value': rmssd_value,
         'afib_label': afib_label,
         'afib_counter': 0, # consecutive positive detections
+        'first_sweep_done': False,
     }
 
 
@@ -963,7 +964,12 @@ def append_plot_sample(plot_state: dict, sample: float):
         plot_state['sweep_buffer'][void_pos] = np.nan
     
     # Move to next position (circular)
+    old_pos = pos  # save before updating
     plot_state['write_pos'] = (pos + 1) % window_samples
+
+    # Detect first full revolution of the buffer
+    if plot_state['write_pos'] < old_pos and not plot_state.get('first_sweep_done', False):
+        plot_state['first_sweep_done'] = True
 
 
 def get_plot_segment(plot_state: dict, total_samples: int):
@@ -1003,6 +1009,12 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
         plot_state['gap_region'].setRegion((gap_start, x_max))
         plot_state['gap_region_wrap'].setRegion((0, gap_end - x_max))
 
+    # Only show R-peak markers after first full sweep cycle
+    if not plot_state['first_sweep_done']:
+        plot_state['scatter_r'].setData([], [])
+        plot_state['afib_label'].setText('CALIBRATING...', color='#888888', size='12pt', bold=False)
+        return
+
     # Update R-peak markers - show recent peaks in the buffer
     visible_peaks = [p for p in r_peaks if p >= window_start_idx]
     if not visible_peaks:
@@ -1031,7 +1043,7 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
         if not np.isnan(display_seg[best_idx]):
             r_x.append(best_idx / fs)
             r_y.append(display_seg[best_idx])
-    
+
     # AFib detection
 
     afib_result = detect_afib(r_peaks, fs)
@@ -1041,7 +1053,7 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
     else:
         plot_state['afib_counter'] = max(0, plot_state.get('afib_counter', 0) - 1)
 
-    # Only alert after 3 consecutive psotive detections
+    # Only alert after 3 consecutive positive detections
 
     if plot_state['afib_counter'] >= 3:
         confidence = afib_result['confidence']
@@ -1229,7 +1241,7 @@ start_time = None
 
 try:
     data_iter = iter(data_generator)
-        
+    
     def process_tick():
         global sample_count, chunk_count, start_time
         try:
