@@ -795,6 +795,56 @@ def compute_rmssd(r_peak_indices, fs):
     rmssd = np.sqrt(np.mean(successive_diffs ** 2))
     return float(rmssd)
 
+def detect_afib(r_peaks: list, fs: float,
+                cv_threshold: float = 0.15,
+                rmssd_threshold: float = 50.0,
+                min_peaks: int = 8) -> dict:
+    """
+    Detect AFib using RR interval irregularity.
+    
+    Returns a dict with:
+        - detected: bool
+        - cv: coefficient of variation (0.0 - 1.0)
+        - rmssd: ms
+        - confidence: 'low' | 'medium' | 'high'
+    """
+    result = {'detected': False, 'cv': 0.0, 'rmssd': 0.0, 'confidence': 'low'}
+
+    if len(r_peaks) < min_peaks + 1:
+        return result # Not enough beats yet
+    
+    # use last 8 RR intervals only
+    recent_peaks = np.array(r_peaks[-(min_peaks + 1):])
+    rr_ms = np.diff(recent_peaks / fs) * 1000.0
+
+    # Coefficient of variation: std / mean
+    mean_rr = np.mean(rr_ms)
+    if mean_rr == 0:
+        return result
+    cv = np.std(rr_ms) / mean_rr
+
+    # RMSSD
+    successive_diffs = np.diff(rr_ms)
+    rmssd = float(np.sqrt(np.mean(successive_diffs ** 2)))
+
+    result['cv'] = cv
+    result['rmssd'] = rmssd
+
+    #Both criteria must be met
+    cv_positive = cv > cv_threshold
+    rmssd_positive = rmssd > rmssd_threshold
+
+    if cv_positive and rmssd_positive:
+        result['detected'] = True
+        # Confidence based on how far above threshold
+        if cv > cv_threshold * 1.5 and rmssd > rmssd_threshold * 1.5:
+            result['confidence'] = 'high'
+        elif cv > cv_threshold * 1.2:
+            result['confidence'] = 'medium'
+        else:
+            result['confidence'] = 'low'
+
+    return result
 
 def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     win = pg.GraphicsLayoutWidget(show=True, title="ECG Continuous Sweep Monitor")
@@ -819,6 +869,15 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
     metrics_layout.addLabel('RMSSD', row=4, col=0, color='#888888', size='12pt')
     rmssd_value = metrics_layout.addLabel('--', row=5, col=0, color='#00aaff', size='32pt', bold=True)
     metrics_layout.addLabel('ms', row=6, col=0, color='#888888', size='10pt')
+
+    metrics_layout.addLabel('', row=7, col=0)  # spacer
+
+    afib_label = metrics_layout.addLabel(
+        '', row=8, col=0,
+        color='#ff4444', 
+        size='16pt', 
+        bold=True
+    )
 
     plot = win.addPlot(row=0, col=0)
     plot.setYRange(-2.0, 2.0)
@@ -882,7 +941,9 @@ def setup_live_plot(fs: float, rolling_window_sec: float = 10.0):
         'void_gap_length': 80,
         'r_peaks': [],  # Store R-peaks for the current sweep cycle
         'hr_value': hr_value,   
-        'rmssd_value': rmssd_value
+        'rmssd_value': rmssd_value,
+        'afib_label': afib_label,
+        'afib_counter': 0, # consecutive positive detections
     }
 
 
@@ -971,6 +1032,36 @@ def update_live_plot(plot_state: dict, fs: float, total_samples: int,
             r_x.append(best_idx / fs)
             r_y.append(display_seg[best_idx])
     
+    # AFib detection
+
+    afib_result = detect_afib(r_peaks, fs)
+
+    if afib_result['detected']:
+        plot_state['afib_counter'] = plot_state.get('afib_counter', 0) + 1
+    else:
+        plot_state['afib_counter'] = max(0, plot_state.get('afib_counter', 0) - 1)
+
+    # Only alert after 3 consecutive psotive detections
+
+    if plot_state['afib_counter'] >= 3:
+        confidence = afib_result['confidence']
+        if confidence == 'high':
+            plot_state['afib_label'].setText(
+                '⚠ AFIB DETECTED', color='#ff4444', size='16pt', bold=True
+            )
+        elif confidence == 'medium':
+            plot_state['afib_label'].setText(
+                '⚠ POSSIBLE AFIB', color='#ffaa00', size='16pt', bold=True
+            )
+        else:
+            plot_state['afib_label'].setText(
+                '? AFIB SUSPECTED', color='#ffff00', size='14pt', bold=True
+            )
+    else:
+        plot_state['afib_label'].setText(
+            '✓ NSR', color='#00ff00', size='14pt', bold=True
+        )
+
     # Update HR and RMSSD from last 8 beats only
     if len(r_peaks) >= 2:
         recent_peaks = np.array(r_peaks[-9:])  # last 9 peaks = last 8 intervals
