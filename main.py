@@ -1,4 +1,3 @@
-
 # main.py - Entry Point
  
 '''
@@ -18,7 +17,7 @@ Data flow per tick:
            → buffer.add_sample()        (chunk buffer)
            → process_streaming_chunk()  (when chunk ready)
            → compute_metrics()          (HR, RMSSD)
-           → afib_detector.update()     (arrhythmia status)
+           → afib_detector.update()     (arrhythmia status — receives pre-computed RMSSD)
            → update_live_plot()         (render frame)
  
 POSITION IN PIPELINE
@@ -168,7 +167,7 @@ processor     = create_streaming_processor(fs, window_duration_sec=3.0,
                                            overlap_duration_sec=1.0)
 afib_detector = AfibDetector()
  
-has_display    = bool(os.environ.get('DISPLAY', '')) or os.name == 'nt'
+has_display     = bool(os.environ.get('DISPLAY', '')) or os.name == 'nt'
 live_plot_state = None
  
 if has_display and HAS_PYQTGRAPH:
@@ -209,15 +208,21 @@ try:
                     chunk_count += 1
  
             if live_plot_state is not None:
-                peaks                        = processor['all_r_peaks']
-                metrics                      = compute_metrics(peaks, fs)
-                afib_status, afib_confidence = afib_detector.update(peaks, fs)
+                peaks   = processor['all_r_peaks']
+                metrics = compute_metrics(peaks, fs)
+ 
+                # Pass the already-computed RMSSD into the AFib detector so it
+                # does not recompute the same value from the same peak list.
+                afib_status, afib_confidence = afib_detector.update(
+                    peaks, fs, rmssd=metrics['rmssd']
+                )
+ 
                 update_live_plot(
                     live_plot_state, fs, sample_count, peaks,
                     hr=metrics['hr'],
                     rmssd=metrics['rmssd'],
                     afib_status=afib_status,
-                    afib_confidence=afib_confidence
+                    afib_confidence=afib_confidence,
                 )
         except Exception as e:
             import traceback
@@ -283,14 +288,24 @@ if len(ts.peak_values) > 0:
     print(f"  Mean Peak Amplitude:     {np.mean(peak_list):.6f}")
     print(f"  Peak Amplitude Range:    {np.min(peak_list):.6f} to {np.max(peak_list):.6f}")
  
-# Post-processing matplotlib visualisation
+# =============================================================================
+# POST-PROCESSING VISUALISATION
+# =============================================================================
+ 
 if len(processor['processed_chunks']) > 0:
-    full_display    = np.array(processor['display_history'],    dtype=float)
-    full_integrator = np.array(processor['integrator_history'], dtype=float)
+    # History deques → numpy arrays for plotting
+    full_display    = np.array(list(processor['display_history']),    dtype=float)
+    full_integrator = np.array(list(processor['integrator_history']), dtype=float)
     max_end_idx     = len(full_display)
  
     if max_end_idx > 0:
-        time_axis       = np.arange(max_end_idx) / fs
+        # Offset into the full session that the capped history represents.
+        # If the history deque filled, it holds only the last _HISTORY_CAP_SEC
+        # seconds; earlier samples were dropped. We compute the global start
+        # index so that time axis labels remain correct.
+        history_start_global = max(0, sample_count - max_end_idx)
+        time_axis = (history_start_global + np.arange(max_end_idx)) / fs
+ 
         rolling_samples = int(5.0 * fs)
  
         if max_end_idx > rolling_samples:
@@ -307,7 +322,7 @@ if len(processor['processed_chunks']) > 0:
             plot_title_suffix = ""
  
         # Downsample for visualisation only
-        downsample_factor = int(fs / 250.0)
+        downsample_factor = max(1, int(fs / 250.0))
         plot_indices    = np.arange(0, len(plot_time), downsample_factor)
         plot_time       = plot_time[plot_indices]
         plot_filtered   = plot_filtered[plot_indices]
@@ -322,9 +337,9 @@ if len(processor['processed_chunks']) > 0:
                  label='Display ECG (0.5–40 Hz)')
  
         if len(unique_r_peaks) > 0:
-            r_peak_times  = np.array(unique_r_peaks) / fs
-            rolling_mask  = (r_peak_times >= plot_time[0]) & (r_peak_times <= plot_time[-1])
-            r_peak_times  = r_peak_times[rolling_mask]
+            r_peak_times = np.array(unique_r_peaks) / fs
+            rolling_mask = (r_peak_times >= plot_time[0]) & (r_peak_times <= plot_time[-1])
+            r_peak_times = r_peak_times[rolling_mask]
             if len(r_peak_times) > 0:
                 peak_y = [
                     plot_filtered[int(np.argmin(np.abs(plot_time - t)))]
@@ -350,10 +365,10 @@ if len(processor['processed_chunks']) > 0:
         )
         for chunk_idx, chunk_data in enumerate(processor['processed_chunks']):
             c_start = chunk_data['global_start_idx']
-            c_end   = c_start + len(chunk_data['filtered'])
-            if c_end > start_idx and c_start < max_end_idx:
-                t_start = max(c_start, start_idx) / fs
-                t_end   = min(c_end, max_end_idx) / fs
+            c_end   = c_start + chunk_data['chunk_len']
+            if c_end > (history_start_global + start_idx) and c_start < (history_start_global + max_end_idx):
+                t_start = max(c_start, history_start_global + start_idx) / fs
+                t_end   = min(c_end,   history_start_global + max_end_idx) / fs
                 if t_start <= plot_time[-1] and t_end >= plot_time[0]:
                     ax3.axvline(t_start, color=chunk_colors[chunk_idx % 20],
                                 alpha=0.6, linewidth=2)

@@ -54,40 +54,40 @@ class AdaptiveThresholdState:
     '''
     Maintains adaptive threshold state for Pan-Tompkins dual-threshold method.
  
-    Beyond the original threshold tracking, this class now also tracks:
+    Beyond the original threshold tracking, this class also tracks:
       - qrs_widths:    recent QRS width estimates (samples) used to scale the
                        snap radius and refractory period dynamically
       - slope_refs:    recent confirmed R-peak slope strengths used to gate
                        candidate peaks on morphological plausibility
     '''
-    
+ 
     # Peak history (last 8 detected R-peaks)
-    peak_values:     deque = field(default_factory=lambda: deque(maxlen=8))
-    peak_times:      deque = field(default_factory=lambda: deque(maxlen=8))
-    integrator_peaks:deque = field(default_factory=lambda: deque(maxlen=8))
+    peak_values:      deque = field(default_factory=lambda: deque(maxlen=8))
+    peak_times:       deque = field(default_factory=lambda: deque(maxlen=8))
+    integrator_peaks: deque = field(default_factory=lambda: deque(maxlen=8))
  
     # QRS width history — drives adaptive snap radius and refractory period
-    qrs_widths:      deque = field(default_factory=lambda: deque(maxlen=8))
+    qrs_widths:       deque = field(default_factory=lambda: deque(maxlen=8))
  
     # Slope reference history — drives the morphological quality gate
-    slope_refs:      deque = field(default_factory=lambda: deque(maxlen=SLOPE_HISTORY_BEATS))
+    slope_refs:       deque = field(default_factory=lambda: deque(maxlen=SLOPE_HISTORY_BEATS))
  
     # Noise and signal estimates
     noise_level:  float = 0.0
     signal_level: float = 0.0
  
     # Threshold values
-    signal_threshold1:    float = 0.0
-    signal_threshold2:    float = 0.0
-    integrator_threshold1:float = 0.0
-    integrator_threshold2:float = 0.0
+    signal_threshold1:     float = 0.0
+    signal_threshold2:     float = 0.0
+    integrator_threshold1: float = 0.0
+    integrator_threshold2: float = 0.0
  
     # ------------------------------------------------------------------ #
-    #  Adaptive parameter helpers                                        #
+    #  Adaptive parameter helpers                                         #
     # ------------------------------------------------------------------ #
  
     def get_mean_qrs_width_ms(self, fs: float) -> float:
-        ''' 
+        '''
         Return the mean QRS width in milliseconds across recent beats.
         Falls back to a physiologically normal seed if no beats observed yet.
         '''
@@ -106,7 +106,6 @@ class AdaptiveThresholdState:
         Clamped to [MIN_SNAP_RADIUS_MS, MAX_SNAP_RADIUS_MS].
         '''
         mean_qrs_ms = self.get_mean_qrs_width_ms(fs)
-        # Use half the QRS width as the snap radius — the peak sits centrally
         snap_ms = np.clip(mean_qrs_ms / 2.0, MIN_SNAP_RADIUS_MS, MAX_SNAP_RADIUS_MS)
         return max(1, int((snap_ms / 1000.0) * fs))
  
@@ -117,11 +116,10 @@ class AdaptiveThresholdState:
         A wide QRS occupies more time, so the refractory period must grow to
         prevent the trailing edge of the beat being mistaken for the next peak.
  
-        Base: MIN_REFRACTORY_MS.  Scales linearly with QRS width above normal,
+        Base: MIN_REFRACTORY_MS. Scales linearly with QRS width above normal,
         clamped to MAX_REFRACTORY_MS.
         '''
         mean_qrs_ms = self.get_mean_qrs_width_ms(fs)
-        # Extra refractory proportional to how much wider than normal the QRS is
         extra_ms = max(0.0, mean_qrs_ms - NORMAL_QRS_WIDTH_MS)
         refractory_ms = np.clip(
             MIN_REFRACTORY_MS + extra_ms,
@@ -131,11 +129,10 @@ class AdaptiveThresholdState:
         return max(1, int((refractory_ms / 1000.0) * fs))
  
     def record_qrs_width(self, width_samples: int):
-        # Append a new QRS width measurement to history.
         self.qrs_widths.append(width_samples)
  
     # ------------------------------------------------------------------ #
-    #  Slope quality gate helpers                                        #
+    #  Slope quality gate helpers                                         #
     # ------------------------------------------------------------------ #
  
     def record_slope_ref(self, slope_strength: float):
@@ -149,9 +146,9 @@ class AdaptiveThresholdState:
     def get_slope_threshold(self) -> float:
         '''
         Return the minimum slope strength a candidate must show to pass the
-        quality gate.  Set to 30 % of the mean confirmed-peak slope so the
-        gate rejects clear imposters without being aggressive enough to clip
-        legitimate wide / low-amplitude beats.
+        quality gate. Set to 30% of the mean confirmed-peak slope so the gate
+        rejects clear imposters without clipping legitimate wide/low-amplitude
+        beats.
  
         Returns 0.0 (gate open) until enough history is available.
         '''
@@ -160,7 +157,7 @@ class AdaptiveThresholdState:
         return 0.30 * float(np.mean(self.slope_refs))
  
     # ------------------------------------------------------------------ #
-    #  Original threshold machinery (unchanged logic, preserved exactly) #
+    #  Original threshold machinery (unchanged logic, preserved exactly)  #
     # ------------------------------------------------------------------ #
  
     def update_noise_level(self, chunk: np.ndarray, detected_peaks: List[int]):
@@ -227,16 +224,16 @@ class AdaptiveThresholdState:
         self.integrator_peaks.clear()
         self.qrs_widths.clear()
         self.slope_refs.clear()
-        self.noise_level          = 0.0
-        self.signal_level         = 0.0
-        self.signal_threshold1    = 0.0
-        self.signal_threshold2    = 0.0
-        self.integrator_threshold1= 0.0
-        self.integrator_threshold2= 0.0
+        self.noise_level           = 0.0
+        self.signal_level          = 0.0
+        self.signal_threshold1     = 0.0
+        self.signal_threshold2     = 0.0
+        self.integrator_threshold1 = 0.0
+        self.integrator_threshold2 = 0.0
  
  
 # --------------------------------------------------------------------------- #
-#  QRS width estimation                                                       #
+#  QRS width estimation                                                        #
 # --------------------------------------------------------------------------- #
  
 def _estimate_qrs_width(filtered_chunk: np.ndarray, r_idx: int,
@@ -245,8 +242,8 @@ def _estimate_qrs_width(filtered_chunk: np.ndarray, r_idx: int,
     Estimate QRS width in samples around a confirmed R-peak.
  
     Strategy: walk outward from R until the signal crosses a threshold equal
-    to 10 % of the R-peak amplitude (the point where the steep QRS slope
-    transitions into the flatter ST / PR baseline).  The total span between
+    to 10% of the R-peak amplitude (the point where the steep QRS slope
+    transitions into the flatter ST/PR baseline). The total span between
     left and right crossing points is the QRS width.
  
     Falls back to a normal seed width if the crossing is not found within the
@@ -257,14 +254,12 @@ def _estimate_qrs_width(filtered_chunk: np.ndarray, r_idx: int,
     max_half_win = int((window_ms / 1000.0) * fs)
     normal_seed  = int((NORMAL_QRS_WIDTH_MS / 1000.0) * fs)
  
-    # Walk left to find Q onset
     left = r_idx
     for i in range(r_idx, max(0, r_idx - max_half_win), -1):
         if abs(filtered_chunk[i]) < threshold:
             left = i
             break
  
-    # Walk right to find S offset
     right = r_idx
     for i in range(r_idx, min(len(filtered_chunk), r_idx + max_half_win)):
         if abs(filtered_chunk[i]) < threshold:
@@ -272,14 +267,13 @@ def _estimate_qrs_width(filtered_chunk: np.ndarray, r_idx: int,
             break
  
     width = right - left
-    # Sanity clamp: must be between 40 ms and 200 ms
     min_w = int(0.040 * fs)
     max_w = int(0.200 * fs)
     return int(np.clip(width, min_w, max_w)) if width > 0 else normal_seed
  
  
 # --------------------------------------------------------------------------- #
-#  Slope quality gate                                                         #
+#  Slope quality gate                                                          #
 # --------------------------------------------------------------------------- #
  
 def _measure_slope_strength(filtered_chunk: np.ndarray, r_idx: int,
@@ -288,48 +282,99 @@ def _measure_slope_strength(filtered_chunk: np.ndarray, r_idx: int,
     Measure the slope strength on both sides of a candidate R-peak.
  
     Computes the mean absolute derivative over a short window before and after
-    the candidate.  Returns the minimum of the two sides — a conservative
+    the candidate. Returns the minimum of the two sides — a conservative
     measure that requires both upslope and downslope to be steep.
  
     A true R-peak has sustained steep slopes on both sides.
     A noise spike has slopes that collapse within one or two samples.
     '''
     half_win = max(2, int((window_ms / 1000.0) * fs))
-    deriv     = np.abs(np.ediff1d(filtered_chunk, to_end=0))
+    deriv    = np.abs(np.ediff1d(filtered_chunk, to_end=0))
  
-    lo_up   = max(0,                    r_idx - half_win)
+    lo_up   = max(0,               r_idx - half_win)
     hi_up   = r_idx
     lo_down = r_idx
-    hi_down = min(len(deriv),           r_idx + half_win)
+    hi_down = min(len(deriv),      r_idx + half_win)
  
-    up_slope   = float(np.mean(deriv[lo_up:hi_up]))   if hi_up   > lo_up   else 0.0
-    down_slope = float(np.mean(deriv[lo_down:hi_down]))if hi_down > lo_down else 0.0
+    up_slope   = float(np.mean(deriv[lo_up:hi_up]))    if hi_up   > lo_up   else 0.0
+    down_slope = float(np.mean(deriv[lo_down:hi_down])) if hi_down > lo_down else 0.0
  
     return min(up_slope, down_slope)
  
  
-def _passes_slope_gate(filtered_chunk: np.ndarray, r_idx: int,
-                        fs: float, threshold_state: AdaptiveThresholdState) -> bool:
+def _check_slope_gate(filtered_chunk: np.ndarray, r_idx: int,
+                       fs: float,
+                       threshold_state: AdaptiveThresholdState) -> Tuple[bool, float]:
     '''
-    Return True if the candidate peak passes the morphological slope gate.
+    Check the morphological slope gate and return both the pass/fail result
+    and the measured slope strength.
  
-    The gate is intentionally lenient — it only rejects candidates whose slope
-    strength falls below 30 % of the mean of recently confirmed peaks.  This
-    avoids rejecting legitimate wide / low-amplitude beats while still catching
-    clear noise survivors.
+    Returning the slope value here avoids a second call to
+    _measure_slope_strength() in the main detection loop — the caller can
+    use it directly for record_slope_ref() without recomputing.
  
     The gate is inactive (always passes) until 3 confirmed peaks have been
     recorded, preventing false rejections during initialisation.
+ 
+    Returns:
+        (passed: bool, slope_strength: float)
     '''
     slope_threshold = threshold_state.get_slope_threshold()
+    slope           = _measure_slope_strength(filtered_chunk, r_idx, fs)
     if slope_threshold == 0.0:
-        return True  # Gate inactive during warm-up
-    slope = _measure_slope_strength(filtered_chunk, r_idx, fs)
-    return slope >= slope_threshold
+        return True, slope   # Gate inactive during warm-up
+    return slope >= slope_threshold, slope
  
  
 # --------------------------------------------------------------------------- #
-#  Main detection function                                                    #
+#  Shared peak acceptance logic                                                #
+# --------------------------------------------------------------------------- #
+ 
+def _accept_peak(filtered_chunk: np.ndarray, integrator: np.ndarray,
+                 p: int, fs: float,
+                 threshold_state: AdaptiveThresholdState,
+                 search_radius: int,
+                 amplitude_threshold: float) -> Tuple[bool, int]:
+    '''
+    Attempt to accept a candidate integrator peak as a confirmed R-peak.
+ 
+    Shared by both the T1 and searchback paths to avoid duplicating the
+    snap, amplitude check, slope gate, and state-recording logic.
+ 
+    Returns:
+        (accepted: bool, r_idx: int)
+        r_idx is valid only when accepted is True.
+    '''
+    lo = max(0, p - search_radius)
+    hi = min(len(filtered_chunk), p + search_radius + 1)
+    if lo >= hi:
+        return False, 0
+ 
+    local_max_idx  = np.argmax(filtered_chunk[lo:hi])
+    r_idx          = lo + int(local_max_idx)
+    peak_amplitude = filtered_chunk[r_idx]
+ 
+    if peak_amplitude < amplitude_threshold:
+        return False, 0
+ 
+    passed, slope_strength = _check_slope_gate(filtered_chunk, r_idx, fs, threshold_state)
+    if not passed:
+        return False, 0
+ 
+    # Record all state for this confirmed peak
+    qrs_width       = _estimate_qrs_width(filtered_chunk, r_idx, fs)
+    threshold_state.record_qrs_width(qrs_width)
+    threshold_state.record_slope_ref(slope_strength)
+ 
+    peak_time_ms    = (r_idx / fs) * 1000.0
+    integrator_peak = integrator[r_idx] if r_idx < len(integrator) else 0.0
+    threshold_state.record_peak(peak_amplitude, integrator_peak, peak_time_ms)
+ 
+    return True, r_idx
+ 
+ 
+# --------------------------------------------------------------------------- #
+#  Main detection function                                                     #
 # --------------------------------------------------------------------------- #
  
 def detect_qrs_chunk(filtered_chunk: np.ndarray, fs: float,
@@ -339,39 +384,39 @@ def detect_qrs_chunk(filtered_chunk: np.ndarray, fs: float,
     '''
     Detect R-peaks using Pan-Tompkins dual-threshold adaptive method.
  
-      Args:
-        filtered_chunk:    Pre-filtered signal chunk from filters.py
-        fs:                Sampling frequency (Hz)
-        threshold_state:   AdaptiveThresholdState carrying cross-chunk history
+    Args:
+        filtered_chunk:       Pre-filtered signal chunk from filters.py
+        fs:                   Sampling frequency (Hz)
+        threshold_state:      AdaptiveThresholdState carrying cross-chunk history
         integrator_window_ms: Moving window length (Pan-Tompkins default 150 ms)
-        refractory_ms:     Minimum inter-peak distance — now used only as the
-                           floor; actual refractory is computed adaptively
+        refractory_ms:        Minimum inter-peak distance — now used only as the
+                              floor; actual refractory is computed adaptively
  
     Returns:
         (r_peak_indices_local, integrator_chunk)
     '''
-
+ 
     # ------------------------------------------------------------------ #
-    #  1–3: Pan-Tompkins preprocessing                                   #
+    #  1–3: Pan-Tompkins preprocessing                                    #
     # ------------------------------------------------------------------ #
-    deriv    = np.ediff1d(filtered_chunk, to_end=0)
-    squared  = deriv ** 2
-    win_len  = max(1, int((integrator_window_ms / 1000.0) * fs))
+    deriv      = np.ediff1d(filtered_chunk, to_end=0)
+    squared    = deriv ** 2
+    win_len    = max(1, int((integrator_window_ms / 1000.0) * fs))
     integrator = np.convolve(squared, np.ones(win_len) / win_len, mode='same')
  
     # ------------------------------------------------------------------ #
-    #  4: Noise estimate                                                 #
+    #  4: Noise estimate                                                  #
     # ------------------------------------------------------------------ #
     threshold_state.update_noise_level(integrator, [])
  
     # ------------------------------------------------------------------ #
-    #  5: Compute adaptive parameters for this chunk                     #
+    #  5: Compute adaptive parameters for this chunk                      #
     # ------------------------------------------------------------------ #
-    distance      = threshold_state.get_refractory_samples(fs)   
-    search_radius = threshold_state.get_snap_radius(fs)          
+    distance      = threshold_state.get_refractory_samples(fs)
+    search_radius = threshold_state.get_snap_radius(fs)
  
     # ------------------------------------------------------------------ #
-    #  6: Find candidate peaks in integrator                             #
+    #  6: Find candidate peaks in integrator                              #
     # ------------------------------------------------------------------ #
     peaks_t1, _ = find_peaks(
         integrator, distance=distance,
@@ -382,96 +427,51 @@ def detect_qrs_chunk(filtered_chunk: np.ndarray, fs: float,
         height=max(1e-12, threshold_state.integrator_threshold2)
     )
  
-    r_peaks        = []
-    last_peak_idx  = -float('inf')
+    r_peaks       = []
+    last_peak_idx = -float('inf')
  
     # ------------------------------------------------------------------ #
-    #  7: Process THRESHOLD1 candidates                                  #
+    #  7: Process THRESHOLD1 candidates                                   #
     # ------------------------------------------------------------------ #
     for p in peaks_t1:
         if (p - last_peak_idx) < distance:
             continue
  
-        lo = max(0, p - search_radius)
-        hi = min(len(filtered_chunk), p + search_radius + 1)
- 
-        if lo >= hi:
-            continue
- 
-        local_max_idx = np.argmax(filtered_chunk[lo:hi])
-        r_idx         = lo + int(local_max_idx)
-        peak_amplitude= filtered_chunk[r_idx]
- 
-        if peak_amplitude < threshold_state.signal_threshold1:
-            continue
- 
-        # Improvement 3: slope quality gate
-        if not _passes_slope_gate(filtered_chunk, r_idx, fs, threshold_state):
-            continue
- 
-        # Accepted — record and update state
-        qrs_width = _estimate_qrs_width(filtered_chunk, r_idx, fs)
-        threshold_state.record_qrs_width(qrs_width)
- 
-        slope_strength = _measure_slope_strength(filtered_chunk, r_idx, fs)
-        threshold_state.record_slope_ref(slope_strength)
- 
-        peak_time_ms  = (r_idx / fs) * 1000.0
-        integrator_peak = integrator[r_idx] if r_idx < len(integrator) else 0
-        threshold_state.record_peak(peak_amplitude, integrator_peak, peak_time_ms)
- 
-        r_peaks.append(r_idx)
-        last_peak_idx = r_idx
+        accepted, r_idx = _accept_peak(
+            filtered_chunk, integrator, p, fs,
+            threshold_state, search_radius,
+            threshold_state.signal_threshold1
+        )
+        if accepted:
+            r_peaks.append(r_idx)
+            last_peak_idx = r_idx
  
     # ------------------------------------------------------------------ #
-    #  8: Searchback using THRESHOLD2                                    #
+    #  8: Searchback — triggers only on a time gap, not candidate counts #
     # ------------------------------------------------------------------ #
-    if len(r_peaks) == 0 or (
-        len(peaks_t2) > 0 and len(r_peaks) < len(peaks_t1) * 0.5
-    ):
-        expected_rr   = threshold_state.get_expected_rr_interval()
-        search_window = int(1.5 * expected_rr)
+    expected_rr  = threshold_state.get_expected_rr_interval()
+    chunk_end    = len(filtered_chunk)
+    gap_since_last = chunk_end - (last_peak_idx if last_peak_idx > -float('inf') else 0)
  
+    if gap_since_last > 1.66 * expected_rr:
         for p in sorted(peaks_t2, reverse=True):
-            if p >= last_peak_idx + search_window:
-                continue
             if (p - last_peak_idx) < distance:
                 continue
  
-            lo = max(0, p - search_radius)
-            hi = min(len(filtered_chunk), p + search_radius + 1)
- 
-            if lo >= hi:
-                continue
- 
-            local_max_idx = np.argmax(filtered_chunk[lo:hi])
-            r_idx         = lo + int(local_max_idx)
-            peak_amplitude= filtered_chunk[r_idx]
- 
-            if peak_amplitude < threshold_state.signal_threshold2:
-                continue
- 
-            # Slope gate applies to searchback candidates too
-            if not _passes_slope_gate(filtered_chunk, r_idx, fs, threshold_state):
-                continue
- 
-            qrs_width = _estimate_qrs_width(filtered_chunk, r_idx, fs)
-            threshold_state.record_qrs_width(qrs_width)
- 
-            slope_strength = _measure_slope_strength(filtered_chunk, r_idx, fs)
-            threshold_state.record_slope_ref(slope_strength)
- 
-            peak_time_ms    = (r_idx / fs) * 1000.0
-            integrator_peak = integrator[r_idx] if r_idx < len(integrator) else 0
-            threshold_state.record_peak(peak_amplitude, integrator_peak, peak_time_ms)
- 
-            r_peaks.append(r_idx)
-            last_peak_idx = r_idx
-            break
+            accepted, r_idx = _accept_peak(
+                filtered_chunk, integrator, p, fs,
+                threshold_state, search_radius,
+                threshold_state.signal_threshold2
+            )
+            if accepted:
+                r_peaks.append(r_idx)
+                last_peak_idx = r_idx
+                break
  
     # ------------------------------------------------------------------ #
-    #  9: Update thresholds for next chunk                               #
+    #  9: Update thresholds for next chunk                                #
     # ------------------------------------------------------------------ #
     threshold_state.update_thresholds()
  
     return np.array(sorted(r_peaks), dtype=int), integrator
+ 

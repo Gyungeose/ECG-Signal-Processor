@@ -22,21 +22,23 @@ TWO LAYERS
  
 POSITION IN PIPELINE
 --------------------
-detection.py  →  processor.py  →  arrhythmia.py  →  display.py
-                                        ↑ YOU ARE HERE
+detection.py  →  processor.py  →  metrics.py  →  arrhythmia.py  →  display.py
+                                                        ↑ YOU ARE HERE
 '''
  
 import numpy as np
+from typing import Optional
  
  
 # --------------------------------------------------------------------------- #
-#  Raw detection (stateless)                                                  #
+#  Raw detection (stateless)                                                   #
 # --------------------------------------------------------------------------- #
  
 def detect_afib(r_peaks: list, fs: float,
-                cv_threshold: float  = 0.15,
+                cv_threshold: float    = 0.15,
                 rmssd_threshold: float = 50.0,
-                min_peaks: int = 8) -> dict:
+                min_peaks: int         = 8,
+                rmssd: Optional[float] = None) -> dict:
     '''
     Detect AFib using RR interval irregularity.
  
@@ -51,6 +53,16 @@ def detect_afib(r_peaks: list, fs: float,
       Sensitive to beat-to-beat variability, the hallmark of AFib.
  
     Both must exceed their thresholds for a positive result.
+ 
+    Args:
+        r_peaks:        List of R-peak sample indices.
+        fs:             Sampling frequency (Hz).
+        cv_threshold:   CV threshold for AFib detection (default 0.15).
+        rmssd_threshold:RMSSD threshold in ms (default 50.0 ms).
+        min_peaks:      Minimum peaks required before detection runs.
+        rmssd:          Pre-computed RMSSD in ms, or None to compute here.
+                        Pass the value from compute_metrics() to avoid
+                        redundant computation.
  
     Returns a dict with:
         detected:    bool
@@ -70,12 +82,15 @@ def detect_afib(r_peaks: list, fs: float,
     if mean_rr == 0:
         return result
  
-    cv               = np.std(rr_ms) / mean_rr
-    successive_diffs = np.diff(rr_ms)
-    rmssd            = float(np.sqrt(np.mean(successive_diffs ** 2)))
+    cv = np.std(rr_ms) / mean_rr
  
-    result['cv']    = cv
-    result['rmssd'] = rmssd
+    # Use the pre-computed RMSSD if supplied; compute only if not provided
+    if rmssd is None:
+        successive_diffs = np.diff(rr_ms)
+        rmssd            = float(np.sqrt(np.mean(successive_diffs ** 2)))
+ 
+    result['cv']    = float(cv)
+    result['rmssd'] = float(rmssd)
  
     if cv > cv_threshold and rmssd > rmssd_threshold:
         result['detected'] = True
@@ -90,7 +105,7 @@ def detect_afib(r_peaks: list, fs: float,
  
  
 # --------------------------------------------------------------------------- #
-#  Stateful decision layer                                                    #
+#  Stateful decision layer                                                     #
 # --------------------------------------------------------------------------- #
  
 class AfibDetector:
@@ -105,7 +120,7 @@ class AfibDetector:
     Usage:
         detector = AfibDetector()
         ...
-        status, confidence = detector.update(r_peaks, fs)
+        status, confidence = detector.update(r_peaks, fs, rmssd=metrics['rmssd'])
         # pass status and confidence directly to update_live_plot()
     '''
  
@@ -121,15 +136,24 @@ class AfibDetector:
         self._negative_streak  = 0
         self._alert_active     = False
  
-    def update(self, r_peaks: list, fs: float) -> tuple:
+    def update(self, r_peaks: list, fs: float,
+               rmssd: Optional[float] = None) -> tuple:
         '''
         Feed the latest R-peak list and get back a display-ready status.
+ 
+        Args:
+            r_peaks: List of global R-peak sample indices.
+            fs:      Sampling frequency (Hz).
+            rmssd:   Pre-computed RMSSD in ms from compute_metrics(), or None
+                     to let detect_afib() compute it. Passing it in avoids a
+                     redundant computation when main.py has already called
+                     compute_metrics() this frame.
  
         Returns:
             status:     'detected' | 'possible' | 'suspected' | 'normal'
             confidence: 'high' | 'medium' | 'low'
         '''
-        result = detect_afib(r_peaks, fs)
+        result = detect_afib(r_peaks, fs, rmssd=rmssd)
  
         if result['detected']:
             self._positive_streak += 1
@@ -138,11 +162,9 @@ class AfibDetector:
             self._negative_streak += 1
             self._positive_streak  = 0
  
-        # Raise alert after confirm_threshold consecutive positives
         if self._positive_streak >= self.confirm_threshold:
             self._alert_active = True
  
-        # Clear alert after clear_threshold consecutive negatives
         if self._negative_streak >= self.clear_threshold:
             self._alert_active = False
  
