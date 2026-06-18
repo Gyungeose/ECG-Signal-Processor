@@ -108,7 +108,7 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
     plot.addItem(scatter_r)
  
     # Write-cursor line
-    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color='#00aaff', width=2))
+    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color='#000000', width=2))
     cursor_line.setVisible(True)
  
     # Void gap: black region ahead of the cursor obscuring stale data
@@ -175,7 +175,7 @@ def append_plot_sample(plot_state: dict, sample: float):
  
  
 # --------------------------------------------------------------------------- #
-#  Frame update                                                                #
+#  Frame update                                                               #
 # --------------------------------------------------------------------------- #
  
 def update_live_plot(plot_state: dict,
@@ -231,18 +231,39 @@ def update_live_plot(plot_state: dict,
         plot_state['afib_label'].setText('CALIBRATING...', color='#888888', size='12pt', bold=False)
         return
  
-    # ---- R-peak markers ---- #
+        # ---- R-peak markers ---- #
     window_start_idx = total_samples - window_samples
     visible_peaks    = [p for p in r_peaks if p >= window_start_idx]
- 
+
+    SNAP_RADIUS = int(0.040 * fs)  # ±40 ms — covers inter-filter phase offset
+
     r_x, r_y = [], []
     for p in visible_peaks[-15:]:
         buf_idx = p % window_samples
-        val     = display_seg[buf_idx]
-        if not np.isnan(val):
-            r_x.append(buf_idx / fs)
-            r_y.append(val)
- 
+
+        # Search for the local maximum in the display signal around buf_idx.
+        # This corrects for the group delay difference between the detection
+        # filter (5–15 Hz) and the display filter (0.5–40 Hz).
+        lo = buf_idx - SNAP_RADIUS
+        hi = buf_idx + SNAP_RADIUS + 1
+
+        if lo >= 0 and hi <= window_samples:
+            # No wrap — straightforward slice
+            local_seg = display_seg[lo:hi]
+            if not np.all(np.isnan(local_seg)):
+                local_max = np.nanargmax(local_seg)
+                snapped_idx = lo + local_max
+                val = display_seg[snapped_idx]
+                if not np.isnan(val):
+                    r_x.append(snapped_idx / fs)
+                    r_y.append(val)
+        else:
+            # Near a wrap boundary — fall back to direct read
+            val = display_seg[buf_idx]
+            if not np.isnan(val):
+                r_x.append(buf_idx / fs)
+                r_y.append(val)
+
     plot_state['scatter_r'].setData(r_x, r_y)
  
     # ---- HR ---- #
