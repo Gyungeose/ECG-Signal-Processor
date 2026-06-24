@@ -88,7 +88,7 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray,
     # ------------------------------------------------------------------ #
     #  2) Baseline wander removal (0.5 Hz high-pass)                     #
     #     This also removes DC offset — no explicit chunk_mean subtraction
-    #     is needed (fix #6).                                             #
+    #     is needed.                                                      #
     # ------------------------------------------------------------------ #
     highpass_filtered = processor['highpass_filter'].apply_chunk(chunk_notched)
  
@@ -108,9 +108,6 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray,
     window_samples   = processor['buffer'].window_samples
     start_global_idx = processor['buffer'].global_sample_idx - window_samples
  
-    print(f"chunk={global_chunk_idx} | start={start_global_idx} | "
-          f"window={window_samples} | chunk_len={len(filtered)}")
- 
     r_peaks_local, integrator = detect_qrs_chunk(
         filtered, fs, processor['threshold_state']
     )
@@ -125,7 +122,6 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray,
         global_idx = start_global_idx + int(idx)
         is_dup     = any(abs(global_idx - existing) <= 3
                          for existing in processor['dedup_r_peaks'])
-        print(f"Peak local={idx}, global={global_idx}, duplicate={is_dup}")
  
         if not is_dup:
             processor['dedup_r_peaks'].append(global_idx)
@@ -151,15 +147,14 @@ def process_streaming_chunk(processor: dict, chunk: np.ndarray,
     #  8) Store lightweight chunk metadata (no signal arrays)             #
     # ------------------------------------------------------------------ #
     processor['processed_chunks'].append({
-        'global_start_idx':    start_global_idx,
-        'chunk_len':           len(filtered),
-        'chunk_idx':           global_chunk_idx,
-        'r_peaks_global':      deduped_r_peaks,
-        'signal_threshold1':   processor['threshold_state'].signal_threshold1,
-        'signal_threshold2':   processor['threshold_state'].signal_threshold2,
-        'integrator_threshold1': processor['threshold_state'].integrator_threshold1,
-        'integrator_threshold2': processor['threshold_state'].integrator_threshold2,
-        'noise_level':         processor['threshold_state'].noise_level,
-        'signal_level':        processor['threshold_state'].signal_level,
+        'global_start_idx':      start_global_idx,
+        'chunk_len':              len(filtered),
+        'chunk_idx':              global_chunk_idx,
+        'r_peaks_global':         deduped_r_peaks,
+        'signal_threshold1':      processor['threshold_state'].signal_threshold1,
+        'signal_threshold2':      processor['threshold_state'].signal_threshold2,
+        'integrator_threshold1':  processor['threshold_state'].integrator_threshold1,
+        'integrator_threshold2':  processor['threshold_state'].integrator_threshold2,
+        'noise_level':            processor['threshold_state'].noise_level,
+        'signal_level':           processor['threshold_state'].signal_level,
     })
- 
