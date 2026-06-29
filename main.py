@@ -172,7 +172,7 @@ live_plot_state = None
  
 if has_display and HAS_PYQTGRAPH:
     try:
-        live_plot_state = setup_live_plot(app, fs, rolling_window_sec=10.0)
+        live_plot_state = setup_live_plot(app, fs, rolling_window_sec=6.0)
     except Exception as e:
         import traceback
         print(f"[ERR] Live plot setup failed: {e}")

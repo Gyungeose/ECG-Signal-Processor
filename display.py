@@ -45,77 +45,87 @@ from typing import List, Optional
 # grid is built manually here as two layers: light minor lines (small
 # squares) and bold major lines (large squares), matching printed ECG paper.
  
-SMALL_SQUARE_SEC = 0.04   # 40 ms
-LARGE_SQUARE_SEC = 0.20   # 200 ms (5 small squares)
-SMALL_SQUARE_MV  = 0.1
-LARGE_SQUARE_MV  = 0.5
+SMALL_SQUARE_SEC = 0.04   # 40 ms — not used for X grid lines (see below)
+LARGE_SQUARE_SEC = 0.20   # 200 ms — base unit for X-axis grid lines
+SMALL_SQUARE_MV  = 0.1    # base unit for Y-axis minor grid lines
+LARGE_SQUARE_MV  = 0.5    # base unit for Y-axis major grid lines
  
-MINOR_GRID_PEN = pg.mkPen(color="#4D4D4D", width=0.5)   # light pink — small squares
-MAJOR_GRID_PEN = pg.mkPen(color="#5d5d5d", width=1.2)   # bold red   — large squares
+# X-axis (time): two tiers — every 0.2s (light), every 1s / 5×0.2s (bold)
+X_LINE_PEN_004S = pg.mkPen(color="#333333", width=0.5)   # light grey — 0.04s lines
+X_LINE_PEN_02S = pg.mkPen(color="#5D5D5D", width=0.7)   # light grey — 0.2s lines
+X_LINE_PEN_1S  = pg.mkPen(color="#888888", width=1.2)   # bold white — 1s lines
+ 
+# Y-axis (voltage): two tiers — every 0.1mV (light), every 0.5mV (bold)
+Y_LINE_PEN_MINOR = pg.mkPen(color='#333333', width=0.5)   # light grey — 0.1mV lines
+Y_LINE_PEN_MAJOR = pg.mkPen(color='#888888', width=0.7)   # bold white — 0.5mV lines
  
  
 def _draw_ecg_grid(plot, x_max: float, y_range: tuple):
     '''
-    Draw a dual-weight ECG-paper-style grid onto `plot`.
+    Draw the ECG sweep grid onto `plot`.
  
-    Minor lines are drawn every small square (0.04s / 0.1mV), major lines
-    every large square (0.20s / 0.5mV). Major lines are drawn after minor
-    lines and with a higher z-value so they render on top, exactly as the
-    bold grid lines sit visually "above" the fine grid on printed ECG paper.
+    X-axis runs on a 0.2s base unit (LARGE_SQUARE_SEC), with every 5th line
+    (1 second) drawn bold. Y-axis runs on the original 0.1mV/0.5mV tiers.
+    The two axes intentionally use different base units now — X has moved
+    to a coarser 0.2s/1s scheme rather than 0.04s/0.2s, per a deliberate
+    simplification for on-screen readability.
  
-    Drawn as individual line items rather than a pre-rendered image — a
-    fixed-resolution image stretched to fit the plot produced moiré/aliasing
-    artifacts. Vector lines render crisply at any zoom/window size, and the
-    grid is static (drawn once at setup), so the per-item cost is paid once,
-    not per frame.
+    Lines are placed by INTEGER line-count, not by comparing floating-point
+    positions against a modulo threshold — this guarantees every 5th line
+    is bold by construction, with no possibility of float-drift misaligning
+    which lines get which weight.
     '''
     y_min, y_max = y_range
  
-    # ---- Vertical lines (time axis) ---- #
-    minor_x = np.arange(0, x_max + SMALL_SQUARE_SEC, SMALL_SQUARE_SEC)
-    major_x = np.arange(0, x_max + LARGE_SQUARE_SEC, LARGE_SQUARE_SEC)
- 
-    for x in minor_x:
-        # Skip positions that coincide with a major line — drawn separately
-        if abs((x / LARGE_SQUARE_SEC) - round(x / LARGE_SQUARE_SEC)) > 1e-6:
-            line = pg.InfiniteLine(pos=x, angle=90, pen=MINOR_GRID_PEN)
-            line.setZValue(-20)
-            plot.addItem(line)
- 
-    for x in major_x:
-        line = pg.InfiniteLine(pos=x, angle=90, pen=MAJOR_GRID_PEN)
-        line.setZValue(-19)
+    # ---- Vertical lines (time axis): 0.04s small grid, 0.2s large grid, bold every 1s ---- #
+    n_x = int(round(x_max / SMALL_SQUARE_SEC)) + 1
+    for i in range(n_x):
+        x     = i * SMALL_SQUARE_SEC
+       
+        bold  = (i % 5 == 0)   # every 5th 0.04s line = 0.2s
+        bold1 = (i % 25 == 0)   # every 5th 0.2s line = 1s
+
+        # Select the pen hierarchy from most specific (1s) to least specific (0.04s)
+        pen   = X_LINE_PEN_1S if bold1 else X_LINE_PEN_02S if bold else X_LINE_PEN_004S
+
+        line  = pg.InfiniteLine(pos=x, angle=90, pen=pen)
+
+        # Keep the 1s and 0.2s lines grouped ahead of the fine grid lines
+        line.setZValue(-19 if bold else -20)
         plot.addItem(line)
  
-    # ---- Horizontal lines (voltage axis) ---- #
-    minor_y = np.arange(y_min, y_max + SMALL_SQUARE_MV, SMALL_SQUARE_MV)
-    major_y = np.arange(y_min, y_max + LARGE_SQUARE_MV, LARGE_SQUARE_MV)
- 
-    for y in minor_y:
-        if abs((y / LARGE_SQUARE_MV) - round(y / LARGE_SQUARE_MV)) > 1e-6:
-            line = pg.InfiniteLine(pos=y, angle=0, pen=MINOR_GRID_PEN)
-            line.setZValue(-20)
-            plot.addItem(line)
- 
-    for y in major_y:
-        line = pg.InfiniteLine(pos=y, angle=0, pen=MAJOR_GRID_PEN)
-        line.setZValue(-19)
+    # ---- Horizontal lines (voltage axis): 0.1mV base, bold every 0.5mV ---- #
+    n_y = int(round((y_max - y_min) / SMALL_SQUARE_MV)) + 1
+    for i in range(n_y):
+        y    = y_min + i * SMALL_SQUARE_MV
+        bold = (i % 5 == 0)   # every 5th 0.1mV line = 0.5mV
+        pen  = Y_LINE_PEN_MAJOR if bold else Y_LINE_PEN_MINOR
+        line = pg.InfiniteLine(pos=y, angle=0, pen=pen)
+        line.setZValue(-19 if bold else -20)
         plot.addItem(line)
  
  
 # --------------------------------------------------------------------------- #
-#  Setup                                                                       #
+#  Setup                                                                      #
 # --------------------------------------------------------------------------- #
  
-def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
+def setup_live_plot(app, fs: float, rolling_window_sec: float = 6.0) -> dict:
     '''
     Initialise the PyQtGraph window, ECG sweep plot, and metrics panel.
- 
+
     Returns a plot_state dict that is passed to every subsequent display call.
     All mutable display state lives here — nothing is stored as a global.
     '''
     win = pg.GraphicsLayoutWidget(show=True, title="ECG Continuous Sweep Monitor")
-    win.resize(1100, 600)
+    # The ECG plot must be a WIDE, SHORT strip to show mm-accurate square
+    # grid cells: at 10s width and 4mV height, true-scale squares require a
+    # plot aspect of ~6.25:1 (width:height) — see SMALL_SQUARE_SEC/MV above.
+    # A roughly-square window forces the aspect lock to expand the y-range
+    # far beyond ±2mV to keep squares square, shrinking the visible grid to
+    # a tiny strip surrounded by blank space. Sizing the window to match
+    # this proportion up front keeps squares both correctly-scaled AND
+    # clearly visible.
+    win.resize(1900, 360)
     win.setWindowTitle("ECG Continuous Sweep Monitor")
     win.show()
     app.processEvents()
@@ -143,7 +153,7 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
  
     # ---- ECG plot (left column) ---- #
     plot = win.addPlot(row=0, col=0)
-    plot.setYRange(-2.0, 2.0)
+    plot.setYRange(-5.0, 5.0)
     plot.setXRange(0, rolling_window_sec)
     plot.setLabel('left', 'Voltage (mV)')
     plot.setLabel('bottom', 'Time (seconds)')
@@ -154,12 +164,12 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
     # like they do on real ECG paper, where only the large squares are
     # implicitly counted (5 small = 1 large = 0.2s; 5 large = 1s).
     x_labels = np.arange(0, rolling_window_sec + 1.0, 1.0)
-    y_labels = np.arange(-2.0, 2.5, 0.5)
+    y_labels = np.arange(-5.0, 5.5, 0.5)
  
     plot.getAxis('bottom').setTicks([[(pos, f'{int(pos)}') for pos in x_labels]])
     plot.getAxis('left').setTicks([[(pos, f'{pos:.1f}') for pos in y_labels]])
  
-    # ---- Lock aspect ratio so grid squares render as true squares ---- #
+        # ---- Lock aspect ratio so grid squares render as true squares ---- #
     # On real ECG paper, 1mm = 0.04s horizontally AND 1mm = 0.1mV vertically —
     # same physical unit, so squares are square regardless of paper size.
     # On screen, x is seconds and y is mV, which are different units with no
@@ -171,7 +181,7 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
     plot.setAspectLocked(True, ratio=SMALL_SQUARE_MV / SMALL_SQUARE_SEC)
  
     # ---- ECG-paper-style dual-weight grid ---- #
-    _draw_ecg_grid(plot, rolling_window_sec, y_range=(-2.0, 2.0))
+    _draw_ecg_grid(plot, rolling_window_sec, y_range=(-5.0, 5.0))
  
     window_samples = int(fs * rolling_window_sec)
  
@@ -187,21 +197,25 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
     plot.addItem(scatter_r)
  
     # Write-cursor line
-    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color='#00aaff', width=2))
-    cursor_line.setVisible(True)
+    cursor_line = plot.addLine(x=0, pen=pg.mkPen(color='#00ff88', width=1.5))
+    cursor_line.setVisible(False)
  
-    # Void gap: black region ahead of the cursor obscuring stale data
+    # Void gap: black region ahead of the cursor obscuring stale data.
+    # zValue is set BELOW the grid (-19/-20) so the grid remains visible
+    # within the gap — the gap should only blank the waveform trace (which
+    # already happens naturally via NaN values in the sweep buffer), not
+    # paint over the grid underneath it.
     gap_region = pg.LinearRegionItem(
         [0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None)
     )
-    gap_region.setZValue(-10)
+    gap_region.setZValue(-25)
     plot.addItem(gap_region)
  
     # Wrap-around portion of the void gap (when it crosses the right edge)
     gap_region_wrap = pg.LinearRegionItem(
         [0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None)
     )
-    gap_region_wrap.setZValue(-10)
+    gap_region_wrap.setZValue(-25)
     plot.addItem(gap_region_wrap)
  
     return {
@@ -217,7 +231,7 @@ def setup_live_plot(app, fs: float, rolling_window_sec: float = 10.0) -> dict:
         'x_fixed':            np.arange(window_samples, dtype=float) / fs,
         'sweep_buffer':       np.full(window_samples, np.nan, dtype=float),
         'write_pos':          0,
-        'void_gap_length':    80,
+        'void_gap_length':    60,
         'first_sweep_done':   False,
         'hr_value':           hr_value,
         'rmssd_value':        rmssd_value,
