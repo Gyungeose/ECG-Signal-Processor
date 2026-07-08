@@ -1,291 +1,376 @@
-# Module 
-
+# data_sources.py - Data Source Generators
+ 
+'''
+Streaming data generators for all supported ECG sources.
+ 
+Every generator yields one sample-row at a time as a dict:
+ 
+    {
+        'samples':    np.ndarray,   # shape (N_leads,) — simultaneous voltages in mV
+        'lead_names': list[str],    # e.g. ['I','II','III','aVR','aVL','aVF','V1'...'V6']
+        'fs':         float,        # sampling frequency in Hz
+        'n_leads':    int,          # number of leads
+        'source':     str,          # database identifier
+    }
+ 
+This uniform contract means the rest of the pipeline (buffer.py, processor.py)
+never needs to know which database or format the data came from — it only sees
+the dict. Adding a new database means adding a new generator here; nothing
+else changes.
+ 
+SUPPORTED SOURCES
+-----------------
+PTB-XL          12-lead, WFDB format (.dat/.hea), 500 Hz or 100 Hz
+Chapman-Shaoxing 12-lead, WFDB format (.dat/.hea), 500 Hz
+MIT-BIH         2-lead,  WFDB format (.dat/.hea), 360 Hz
+CSV             Any number of leads, plain CSV, user-specified fs
+Synthetic       Single lead (Lead II proxy), generated on the fly
+ 
+INSTALLATION
+------------
+WFDB format requires the wfdb library:
+    pip install wfdb
+'''
+ 
 import numpy as np
-from typing import Tuple, List
-
-def stream_from_csv(filepath: str, fs: float = 360.0) -> Tuple:
-    """
-    Generator that streams ECG data from a CSV file.
-    
+from typing import Generator
+ 
+# Standard 12-lead order used across PTB-XL and Chapman-Shaoxing
+STANDARD_12_LEAD_NAMES = [
+    'I', 'II', 'III', 'aVR', 'aVL', 'aVF',
+    'V1', 'V2', 'V3', 'V4', 'V5', 'V6'
+]
+ 
+ 
+# --------------------------------------------------------------------------- #
+#  WFDB reader (PTB-XL, Chapman-Shaoxing, MIT-BIH)                            #
+# --------------------------------------------------------------------------- #
+ 
+def stream_from_wfdb(record_path: str,
+                     source: str = 'wfdb') -> Generator:
+    '''
+    Stream any WFDB-format ECG record sample by sample.
+ 
+    Works with PTB-XL, Chapman-Shaoxing, MIT-BIH, and any other PhysioNet
+    database that distributes data as .dat/.hea pairs. Pass the record path
+    without file extension (e.g. '/data/ptbxl/records500/00001_hr').
+ 
+    Lead names are read directly from the .hea header, so they will match
+    the database's own naming convention automatically.
+ 
     Args:
-        filepath: Path to CSV file with ECG samples (one per line or column)
-        fs: Sampling frequency (Hz)
-    
+        record_path: Path to the WFDB record, without file extension.
+        source:      Label identifying the database (stored in the dict for
+                     downstream use — does not affect signal processing).
+ 
     Yields:
-        Individual ECG samples as floats, normalized to mV range
-    """
+        Sample dicts with 'samples', 'lead_names', 'fs', 'n_leads', 'source'.
+    '''
     try:
-        import csv
-        print(f"Reading from CSV file: {filepath}")
-
-        def _is_number(value: str) -> bool:
-            try:
-                float(value)
-                return True
-            except (ValueError, TypeError):
-                return False
-
-        def _is_integer_like(value: str) -> bool:
-            try:
-                return abs(float(value) - round(float(value))) < 0.01
-            except (ValueError, TypeError):
-                return False
-
-        def _choose_column_by_header(header_row: List[str]) -> int:
-            normalized = [str(h).strip().lower() for h in header_row]
-            for keyword in ['mlii', 'ecg', 'lead', 'v5', 'ii', 'signal', 'amplitude']:
-                for idx, name in enumerate(normalized):
-                    if keyword in name:
-                        return idx
-            if len(normalized) > 1 and normalized[0] in ('', 'index', 'sample', 'time', 't'):
-                return 1
-            return 0
-
-        def _choose_column_from_preview(rows: List[List[str]]) -> int:
-            if not rows:
-                return 0
-            # Prefer the first column that is not a simple sequential integer index.
-            for idx in range(len(rows[0])):
-                try:
-                    values = [float(row[idx]) for row in rows if len(row) > idx and _is_number(row[idx])]
-                except ValueError:
-                    continue
-                if len(values) < 3:
-                    continue
-                if all(_is_integer_like(str(v)) for v in values[:3]):
-                    continue
-                return idx
-            if len(rows[0]) > 1:
-                return 1
-            return 0
-
-        sample_buffer = []
-        max_samples_check = 1000
-        selected_column = 0
-        header_names = None
-        preview_rows = []
-
-        with open(filepath, 'r', newline='') as f:
-            reader = csv.reader(f)
-            try:
-                first_row = next(reader)
-            except StopIteration:
-                first_row = []
-
-            if first_row and not all(_is_number(str(h).strip()) for h in first_row):
-                header_names = first_row
-            elif first_row:
-                preview_rows.append(first_row)
-
-            for row in reader:
-                if len(preview_rows) < 5:
-                    preview_rows.append(row)
-                if len(sample_buffer) >= max_samples_check:
-                    continue
-                try:
-                    if header_names is None:
-                        sample_val = float(row[0]) if row else None
-                    else:
-                        sample_val = float(row[0]) if row else None
-                    if sample_val is not None:
-                        sample_buffer.append(sample_val)
-                except (ValueError, IndexError):
-                    continue
-
-        if header_names is not None:
-            selected_column = _choose_column_by_header(header_names)
-        else:
-            selected_column = _choose_column_from_preview(preview_rows)
-
-        # Re-run the first pass using the selected signal column if necessary
-        sample_buffer = []
-        with open(filepath, 'r', newline='') as f:
-            reader = csv.reader(f)
-            if header_names is not None:
-                try:
-                    next(reader)
-                except StopIteration:
-                    pass
-
-            for row in reader:
-                if len(sample_buffer) >= max_samples_check:
-                    break
-                if len(row) > selected_column:
-                    try:
-                        sample_val = float(row[selected_column])
-                        sample_buffer.append(sample_val)
-                    except (ValueError, IndexError):
-                        continue
-
-        if len(sample_buffer) > 0:
-            min_val = min(sample_buffer)
-            max_val = max(sample_buffer)
-            range_val = max_val - min_val
-            is_large_integer = (range_val > 100 and
-                                all(abs(x - round(x)) < 0.01 for x in sample_buffer[:100]))
-
-            if is_large_integer:
-                normalization_factor = 4.0 / range_val
-                offset = (max_val + min_val) / 2.0
-                print(f"  [INFO] Detected large integer values (range: {min_val:.0f} to {max_val:.0f})")
-                print(f"  [INFO] Normalizing to ±2.0 mV range")
-            else:
-                normalization_factor = 1.0
-                offset = 0.0
-                print(f"  [INFO] Values appear to be pre-normalized (range: {min_val:.3f} to {max_val:.3f})")
-        else:
-            normalization_factor = 1.0
-            offset = 0.0
-
-        with open(filepath, 'r', newline='') as f:
-            reader = csv.reader(f)
-            if header_names is not None:
-                try:
-                    next(reader)
-                except StopIteration:
-                    return
-
-            for row in reader:
-                try:
-                    if len(row) > selected_column:
-                        sample_val = float(row[selected_column])
-                        normalized_val = (sample_val - offset) * normalization_factor
-                        yield normalized_val
-                except (ValueError, IndexError):
-                    continue
-    except FileNotFoundError:
-        print(f"Error: File not found: {filepath}")
+        import wfdb
+    except ImportError:
+        print('[ERR] wfdb not installed. Run: pip install wfdb')
         return
-
-
-def stream_from_serial(port: str = 'COM3', baudrate: int = 9600, 
-                       timeout: float = 1.0, sample_format: str = 'float') -> Tuple:
-    """
-    Generator that streams ECG data from a serial device.
-    
+ 
+    try:
+        record = wfdb.rdrecord(record_path)
+    except Exception as e:
+        print(f'[ERR] Could not read WFDB record {record_path}: {e}')
+        return
+ 
+    signal   = record.p_signal          # shape (n_samples, n_leads), in mV
+    fs       = float(record.fs)
+    lead_names = list(record.sig_name)
+    n_leads  = signal.shape[1]
+    n_samples= signal.shape[0]
+ 
+    print(f'[OK] Loaded {source} record: {n_samples} samples, '
+          f'{n_leads} leads {lead_names}, {fs} Hz')
+ 
+    for i in range(n_samples):
+        row = signal[i]
+        # Replace NaN (missing samples in some records) with 0.0
+        row = np.where(np.isnan(row), 0.0, row)
+        yield {
+            'samples':    row,
+            'lead_names': lead_names,
+            'fs':         fs,
+            'n_leads':    n_leads,
+            'source':     source,
+        }
+ 
+ 
+def stream_ptbxl(record_path: str) -> Generator:
+    '''Stream a PTB-XL record (12-lead, 500 Hz or 100 Hz WFDB format).'''
+    return stream_from_wfdb(record_path, source='ptbxl')
+ 
+ 
+def stream_chapman(record_path: str) -> Generator:
+    '''Stream a Chapman-Shaoxing record (12-lead, 500 Hz WFDB format).'''
+    return stream_from_wfdb(record_path, source='chapman')
+ 
+ 
+def stream_mitbih(record_path: str) -> Generator:
+    '''Stream a MIT-BIH record (2-lead, 360 Hz WFDB format).'''
+    return stream_from_wfdb(record_path, source='mitbih')
+ 
+ 
+# --------------------------------------------------------------------------- #
+#  CSV reader (generic multi-lead)                                             #
+# --------------------------------------------------------------------------- #
+ 
+def stream_from_csv(filepath: str,
+                    fs: float = 360.0,
+                    lead_names: list = None) -> Generator:
+    '''
+    Stream an ECG CSV file sample by sample.
+ 
+    Each row in the CSV should contain one sample per lead. If the first row
+    is a header, lead names are read from it; otherwise `lead_names` is used
+    if provided, or generic names ('Lead_0', 'Lead_1', ...) are assigned.
+ 
+    Handles both pre-normalised (mV range) and large-integer (ADC units)
+    values — integer ranges are rescaled to ±2 mV automatically.
+ 
     Args:
-        port: Serial port (e.g., 'COM3' on Windows, '/dev/ttyUSB0' on Linux)
-        baudrate: Baud rate (typically 9600, 115200, etc.)
-        timeout: Read timeout in seconds
-        sample_format: 'float' for 4-byte float, 'int' for integer values
-    
+        filepath:   Path to the CSV file.
+        fs:         Sampling frequency in Hz.
+        lead_names: Optional list of lead name strings. Overridden by header
+                    row if the CSV has one.
+ 
     Yields:
-        Individual ECG samples as floats
-    """
+        Sample dicts with 'samples', 'lead_names', 'fs', 'n_leads', 'source'.
+    '''
+    import csv
+ 
+    def _is_number(s):
+        try:
+            float(s)
+            return True
+        except (ValueError, TypeError):
+            return False
+ 
+    try:
+        with open(filepath, 'r', newline='') as f:
+            reader   = csv.reader(f)
+            first    = next(reader, [])
+            has_header = first and not all(_is_number(v.strip()) for v in first)
+ 
+            if has_header:
+                header     = [h.strip() for h in first]
+                lead_names = header
+                rows       = list(reader)
+            else:
+                rows       = [first] + list(reader)
+ 
+        if not rows:
+            print(f'[ERR] CSV file is empty: {filepath}')
+            return
+ 
+        # Determine number of leads from first valid row
+        first_valid = next((r for r in rows if r), None)
+        if first_valid is None:
+            return
+        n_leads = len(first_valid)
+ 
+        if lead_names is None or len(lead_names) != n_leads:
+            lead_names = [f'Lead_{i}' for i in range(n_leads)]
+ 
+        # Sample 200 rows to decide whether to normalise
+        sample_rows = []
+        for row in rows[:200]:
+            try:
+                sample_rows.append([float(v) for v in row if v.strip()])
+            except ValueError:
+                continue
+ 
+        if sample_rows:
+            all_vals  = np.array(sample_rows).flatten()
+            val_range = np.max(all_vals) - np.min(all_vals)
+            if val_range > 100:
+                # ADC integer values — rescale to ±2 mV
+                mid   = (np.max(all_vals) + np.min(all_vals)) / 2.0
+                scale = 4.0 / val_range
+                print(f'[INFO] CSV: large integer values detected, '
+                      f'rescaling to ±2 mV (range {val_range:.0f})')
+            else:
+                mid, scale = 0.0, 1.0
+                print(f'[INFO] CSV: pre-normalised values detected '
+                      f'(range {val_range:.3f})')
+        else:
+            mid, scale = 0.0, 1.0
+ 
+        print(f'[OK] CSV: {len(rows)} samples, {n_leads} leads '
+              f'{lead_names}, {fs} Hz')
+ 
+        for row in rows:
+            if not row:
+                continue
+            try:
+                vals = np.array([float(v) for v in row[:n_leads]], dtype=float)
+                vals = (vals - mid) * scale
+                yield {
+                    'samples':    vals,
+                    'lead_names': lead_names,
+                    'fs':         fs,
+                    'n_leads':    n_leads,
+                    'source':     'csv',
+                }
+            except (ValueError, IndexError):
+                continue
+ 
+    except FileNotFoundError:
+        print(f'[ERR] File not found: {filepath}')
+ 
+ 
+# --------------------------------------------------------------------------- #
+#  Serial / Network (live hardware)                                            #
+# --------------------------------------------------------------------------- #
+ 
+def stream_from_serial(port: str = 'COM3', baudrate: int = 115200,
+                       n_leads: int = 1,
+                       lead_names: list = None,
+                       fs: float = 360.0) -> Generator:
+    '''
+    Stream ECG data from a serial device.
+ 
+    Expects the device to send one row of N_leads float values per sample,
+    space- or comma-separated, terminated by newline.
+ 
+    Args:
+        port:       Serial port (e.g. 'COM3' or '/dev/ttyUSB0').
+        baudrate:   Baud rate.
+        n_leads:    Number of leads the device transmits.
+        lead_names: Lead name list. Defaults to ['Lead_0', ...].
+        fs:         Sampling frequency in Hz.
+    '''
+    if lead_names is None:
+        lead_names = [f'Lead_{i}' for i in range(n_leads)]
+ 
     try:
         import serial
-        import struct
-        
-        print(f"Connecting to serial port: {port} at {baudrate} baud...")
-        ser = serial.Serial(port, baudrate, timeout=timeout)
-        print(f"[OK] Connected to {port}")
-        
+        ser = serial.Serial(port, baudrate, timeout=1.0)
+        print(f'[OK] Connected to {port} at {baudrate} baud')
         try:
             while True:
-                if sample_format == 'float':
-                    # Expecting 4-byte float samples
-                    if ser.in_waiting >= 4:
-                        data = ser.read(4)
-                        sample = struct.unpack('f', data)[0]
-                        yield sample
-                elif sample_format == 'int':
-                    # Expecting integer samples
-                    if ser.in_waiting >= 2:
-                        data = ser.read(2)
-                        sample = struct.unpack('h', data)[0] / 1000.0  # Convert to mV
-                        yield sample
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if not line:
+                    continue
+                parts = line.replace(',', ' ').split()
+                if len(parts) < n_leads:
+                    continue
+                try:
+                    vals = np.array([float(p) for p in parts[:n_leads]])
+                    yield {
+                        'samples':    vals,
+                        'lead_names': lead_names,
+                        'fs':         fs,
+                        'n_leads':    n_leads,
+                        'source':     'serial',
+                    }
+                except ValueError:
+                    continue
         except KeyboardInterrupt:
-            print("\n[OK] Serial stream stopped by user")
+            print('\n[OK] Serial stream stopped')
         finally:
             ser.close()
-            print("[OK] Serial port closed")
     except ImportError:
-        print("Error: pyserial not installed. Install with: pip install pyserial")
-        return
+        print('[ERR] pyserial not installed. Run: pip install pyserial')
     except Exception as e:
-        print(f"Error: {e}")
-        return
-
-
+        print(f'[ERR] Serial error: {e}')
+ 
+ 
 def stream_from_network(host: str = 'localhost', port: int = 5000,
-                       buffer_size: int = 1024) -> Tuple:
-    """
-    Generator that streams ECG data from a network socket.
-    
-    Args:
-        host: Server hostname or IP address
-        port: Server port number
-        buffer_size: Socket buffer size in bytes
-    
-    Yields:
-        Individual ECG samples as floats
-    """
+                        n_leads: int = 1,
+                        lead_names: list = None,
+                        fs: float = 360.0) -> Generator:
+    '''
+    Stream ECG data from a TCP socket.
+ 
+    Expects the server to send one newline-terminated row of N_leads float
+    values per sample, space- or comma-separated.
+    '''
+    if lead_names is None:
+        lead_names = [f'Lead_{i}' for i in range(n_leads)]
+ 
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5.0)
     try:
-        import socket
-        import struct
-        
-        print(f"Connecting to {host}:{port}...")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        
-        try:
-            sock.connect((host, port))
-            print(f"[OK] Connected to {host}:{port}")
-            
-            while True:
-                data = sock.recv(4)  # 4-byte float per sample
-                if not data:
-                    print("[OK] Connection closed by server")
-                    break
-                try:
-                    sample = struct.unpack('f', data)[0]
-                    yield sample
-                except struct.error:
+        sock.connect((host, port))
+        print(f'[OK] Connected to {host}:{port}')
+        buf = ''
+        while True:
+            data = sock.recv(1024).decode('utf-8', errors='ignore')
+            if not data:
+                break
+            buf += data
+            while '\n' in buf:
+                line, buf = buf.split('\n', 1)
+                parts = line.strip().replace(',', ' ').split()
+                if len(parts) < n_leads:
                     continue
-        except socket.timeout:
-            print("Error: Connection timeout")
-            return
-        except KeyboardInterrupt:
-            print("\n[OK] Network stream stopped by user")
-        finally:
-            sock.close()
-            print("[OK] Socket closed")
-    except Exception as e:
-        print(f"Error: {e}")
-        return
-
-
-def stream_synthetic(fs: float = 360.0, duration: float = 30.0, 
-                     heart_rate: int = 72) -> Tuple:
-    """
-    Generator that simulates a real ECG stream for testing.
-    
-    Args:
-        fs: Sampling frequency (Hz)
-        duration: Duration to stream (seconds)
-        heart_rate: Simulated heart rate (bpm)
-    
-    Yields:
-        Individual ECG samples as floats
-    """
-    print(f"Generating synthetic ECG ({duration}s at {fs} Hz, {heart_rate} bpm)...")
+                try:
+                    vals = np.array([float(p) for p in parts[:n_leads]])
+                    yield {
+                        'samples':    vals,
+                        'lead_names': lead_names,
+                        'fs':         fs,
+                        'n_leads':    n_leads,
+                        'source':     'network',
+                    }
+                except ValueError:
+                    continue
+    except socket.timeout:
+        print('[ERR] Network connection timed out')
+    except KeyboardInterrupt:
+        print('\n[OK] Network stream stopped')
+    finally:
+        sock.close()
+ 
+ 
+# --------------------------------------------------------------------------- #
+#  Synthetic generator (testing)                                               #
+# --------------------------------------------------------------------------- #
+ 
+def stream_synthetic(fs: float = 360.0, duration: float = 30.0,
+                     heart_rate: int = 72) -> Generator:
+    '''
+    Generate a synthetic single-lead ECG stream for testing.
+ 
+    Produces a Lead II proxy — upright QRS, positive T wave — which is
+    sufficient to test the full pipeline without real patient data.
+ 
+    Yields sample dicts with n_leads=1 and lead_names=['II'].
+    '''
+    print(f'[SYN] Generating synthetic ECG: {duration}s at {fs} Hz, '
+          f'{heart_rate} bpm')
+ 
     total_samples = int(duration * fs)
-    rr_samples = int(fs * 60.0 / heart_rate)
-    signal = np.zeros(total_samples)
-
+    rr_samples    = int(fs * 60.0 / heart_rate)
+    signal        = np.zeros(total_samples)
+ 
     for beat_start in range(0, total_samples, rr_samples):
-        # Sharp Gaussian QRS spike — energy in 5–20 Hz range
+        # QRS spike
         for offset in range(-25, 26):
             idx = beat_start + offset
             if 0 <= idx < total_samples:
                 signal[idx] += 1.5 * np.exp(-0.5 * (offset / 5.0) ** 2)
-        # Small T-wave ~200ms after QRS
-        t_center = beat_start + int(0.2 * fs)
+        # T wave ~200ms after QRS
+        t_centre = beat_start + int(0.2 * fs)
         for offset in range(-30, 31):
-            idx = t_center + offset
+            idx = t_centre + offset
             if 0 <= idx < total_samples:
                 signal[idx] += 0.3 * np.exp(-0.5 * (offset / 15.0) ** 2)
-
+ 
     signal += 0.02 * np.random.randn(total_samples)
+ 
     for sample in signal:
-        yield float(sample)
+        yield {
+            'samples':    np.array([float(sample)]),
+            'lead_names': ['II'],
+            'fs':         fs,
+            'n_leads':    1,
+            'source':     'synthetic',
+        }
+ 
