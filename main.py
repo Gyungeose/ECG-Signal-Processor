@@ -94,17 +94,17 @@ if choice == 1:
     source_name    = 'Synthetic ECG'
  
 elif choice == 2:
-    record = input('  MIT-BIH record path (no extension): ').strip()
+    record = os.path.splitext(input('  MIT-BIH record path: ').strip())[0]
     data_generator = stream_mitbih(record)
     source_name    = f'MIT-BIH: {record}'
- 
+
 elif choice == 3:
-    record = input('  PTB-XL record path (no extension): ').strip()
+    record = os.path.splitext(input('  PTB-XL record path: ').strip())[0]
     data_generator = stream_ptbxl(record)
     source_name    = f'PTB-XL: {record}'
- 
+
 elif choice == 4:
-    record = input('  Chapman record path (no extension): ').strip()
+    record = os.path.splitext(input('  Chapman record path: ').strip())[0]
     data_generator = stream_chapman(record)
     source_name    = f'Chapman-Shaoxing: {record}'
  

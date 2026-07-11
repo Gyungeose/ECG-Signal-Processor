@@ -1,25 +1,23 @@
 # display.py - Live ECG Rendering
  
 '''
-Renders the live 12-lead ECG display and metrics panel.
+Renders the live 12-lead ECG display as four column plots plus a rhythm strip.
  
 LAYOUT
 ------
-Four columns × three rows of per-lead sweep plots, with a full-width
-Lead II rhythm strip underneath, and a metrics panel on the right:
+Four columns × three rows, each column is one PyQtGraph plot containing
+three vertically-offset traces sharing a single grid. A full-width Lead II
+rhythm strip runs underneath. Metrics panel sits on the right.
  
-    Col:  0       1       2       3       | 4 (metrics, rowspan=4)
-    Row 0: I      aVR     V1      V4      |
-    Row 1: II     aVL     V2      V5      |
-    Row 2: III    aVF     V3      V6      |
-    Row 3: [    Lead II rhythm strip    ] |
+    Col 0      Col 1      Col 2      Col 3      | Metrics
+    I          aVR        V1         V4         |
+    II         aVL        V2         V5         | HR
+    III        aVF        V3         V6         | RMSSD
+    ──────────── Lead II rhythm strip ────────── | AFib
  
-Each of the 12 cells shows 2.5 seconds of that lead's sweep.
-The rhythm strip shows the full rolling_window_sec (default 10s).
-All sweeps advance in lockstep — one sample per tick.
- 
-Missing leads (e.g. MIT-BIH 2-lead records) show an "N/A" placeholder
-in the relevant cell instead of a trace.
+Each column shows CELL_WINDOW_SEC (2.5s) of signal.
+The rhythm strip shows rolling_window_sec (10s).
+All columns advance in lockstep — one shared write cursor.
  
 WHAT THIS MODULE DOES NOT DO
 -----------------------------
@@ -42,16 +40,25 @@ from typing import List, Optional
 #  Layout constants                                                             #
 # --------------------------------------------------------------------------- #
  
-GRID_LAYOUT = [
-    ['I',   'aVR', 'V1', 'V4'],
-    ['II',  'aVL', 'V2', 'V5'],
-    ['III', 'aVF', 'V3', 'V6'],
+# 4 columns, each with 3 leads stacked top to bottom
+COLUMNS = [
+    ['I',   'II',  'III'],
+    ['aVR', 'aVL', 'aVF'],
+    ['V1',  'V2',  'V3' ],
+    ['V4',  'V5',  'V6' ],
 ]
-RHYTHM_LEAD     = 'II'
-CELL_WINDOW_SEC = 2.5
-Y_RANGE         = (-2.0, 2.0)
  
-# Lead name aliases — maps database-specific names to standard grid names
+RHYTHM_LEAD      = 'II'
+CELL_WINDOW_SEC  = 2.5    # seconds visible in each column cell
+TRACE_OFFSET_MV  = 2.5    # vertical separation between traces in a column
+TRACE_HALF_MV    = 1.0    # ± amplitude each trace is allowed to occupy
+ 
+N_ROWS = 3   # leads per column
+# Y-range for each column plot
+_COL_TOP_Y    =  (N_ROWS - 1) * TRACE_OFFSET_MV + TRACE_HALF_MV + 0.3
+_COL_BOTTOM_Y = -TRACE_HALF_MV - 0.3
+ 
+# Lead name aliases
 _LEAD_ALIASES = {
     'MLII': 'II', 'MLI': 'I', 'MLIII': 'III',
     'AVR': 'aVR', 'AVL': 'aVL', 'AVF': 'aVF',
@@ -59,85 +66,74 @@ _LEAD_ALIASES = {
  
  
 def _normalize_lead(name: str) -> str:
-    '''Map database-specific lead names to standard 12-lead names.'''
     return _LEAD_ALIASES.get(name.upper(), name)
+ 
+ 
+def _row_baseline(row_idx: int) -> float:
+    '''Y-coordinate of the centreline for row_idx (0=top) within a column.'''
+    return (N_ROWS - 1 - row_idx) * TRACE_OFFSET_MV
  
  
 # --------------------------------------------------------------------------- #
 #  ECG-paper-style grid                                                         #
 # --------------------------------------------------------------------------- #
  
-SMALL_SQUARE_SEC = 0.04
 LARGE_SQUARE_SEC = 0.20
 SMALL_SQUARE_MV  = 0.1
-LARGE_SQUARE_MV  = 0.5
+SMALL_SQUARE_SEC = 0.04
  
-X_LINE_PEN_02S = pg.mkPen(color='#999999', width=0.5)
-X_LINE_PEN_1S  = pg.mkPen(color='#ffffff', width=1.4)
-Y_LINE_PEN_MINOR = pg.mkPen(color='#999999', width=0.5)
-Y_LINE_PEN_MAJOR = pg.mkPen(color='#ffffff', width=1.4)
+X_LINE_PEN_02S   = pg.mkPen(color='#555555', width=0.5)
+X_LINE_PEN_1S    = pg.mkPen(color='#888888', width=1.2)
+Y_LINE_PEN_MINOR = pg.mkPen(color='#555555', width=0.5)
+Y_LINE_PEN_MAJOR = pg.mkPen(color='#888888', width=1.2)
  
  
-def _draw_ecg_grid(plot, x_max: float, y_range: tuple):
-    '''Draw dual-weight ECG-paper grid. Integer line-count avoids float drift.'''
-    y_min, y_max = y_range
- 
+def _draw_ecg_grid(plot, x_max: float, y_min: float, y_max: float):
+    '''Dual-weight ECG-paper grid. Integer line-count avoids float drift.'''
     n_x = int(round(x_max / LARGE_SQUARE_SEC)) + 1
     for i in range(n_x):
         x    = i * LARGE_SQUARE_SEC
         bold = (i % 5 == 0)
-        pen  = X_LINE_PEN_1S if bold else X_LINE_PEN_02S
-        line = pg.InfiniteLine(pos=x, angle=90, pen=pen)
-        line.setZValue(-19 if bold else -20)
+        line = pg.InfiniteLine(pos=x, angle=90,
+                                pen=X_LINE_PEN_1S if bold else X_LINE_PEN_02S)
+        line.setZValue(-20)
         plot.addItem(line)
  
     n_y = int(round((y_max - y_min) / SMALL_SQUARE_MV)) + 1
     for i in range(n_y):
         y    = y_min + i * SMALL_SQUARE_MV
         bold = (i % 5 == 0)
-        pen  = Y_LINE_PEN_MAJOR if bold else Y_LINE_PEN_MINOR
-        line = pg.InfiniteLine(pos=y, angle=0, pen=pen)
-        line.setZValue(-19 if bold else -20)
+        line = pg.InfiniteLine(pos=y, angle=0,
+                                pen=Y_LINE_PEN_MAJOR if bold else Y_LINE_PEN_MINOR)
+        line.setZValue(-20)
         plot.addItem(line)
  
  
 # --------------------------------------------------------------------------- #
-#  Cell helpers                                                                 #
+#  Column plot builder                                                          #
 # --------------------------------------------------------------------------- #
  
-def _make_cell(win, row: int, col: int, lead_name: str, fs: float,
-               available_leads: set, cell_window_sec: float) -> Optional[dict]:
+def _make_column(win, col_idx: int, lead_names_in_col: list,
+                 fs: float, available: set) -> dict:
     '''
-    Add one ECG cell to the layout grid.
+    Build one column plot containing up to 3 vertically-offset traces.
  
-    Returns a cell-state dict for active leads, or None for missing leads
-    (which still get a labelled placeholder plot).
+    Returns a column-state dict with sweep buffers and trace handles.
     '''
-    plot = win.addPlot(row=row, col=col)
+    cell_samples = int(fs * CELL_WINDOW_SEC)
+    x_fixed      = np.arange(cell_samples, dtype=float) / fs
+ 
+    plot = win.addPlot(row=0, col=col_idx)
     plot.setMouseEnabled(x=False, y=False)
-    plot.setYRange(*Y_RANGE)
-    plot.setXRange(0, cell_window_sec)
-    plot.hideAxis('bottom')
+    plot.setXRange(0, CELL_WINDOW_SEC)
+    plot.setYRange(_COL_BOTTOM_Y, _COL_TOP_Y)
     plot.hideAxis('left')
-    plot.setContentsMargins(0, 0, 0, 0)
+    plot.hideAxis('bottom')
+    plot.setContentsMargins(1, 1, 1, 1)
  
-    # Lead label — top-left corner
-    label = pg.TextItem(lead_name, color='#aaaaaa', anchor=(0, 1))
-    label.setPos(0.02, Y_RANGE[1])
-    plot.addItem(label)
+    _draw_ecg_grid(plot, CELL_WINDOW_SEC, _COL_BOTTOM_Y, _COL_TOP_Y)
  
-    if lead_name not in available_leads:
-        na = pg.TextItem('N/A', color='#444444', anchor=(0.5, 0.5))
-        na.setPos(cell_window_sec / 2.0, 0.0)
-        plot.addItem(na)
-        return None
- 
-    _draw_ecg_grid(plot, cell_window_sec, Y_RANGE)
-    plot.setAspectLocked(True, ratio=SMALL_SQUARE_MV / SMALL_SQUARE_SEC)
- 
-    window_samples = int(fs * cell_window_sec)
-    line = plot.plot(pen=pg.mkPen(color='#00ff88', width=1.0))
- 
+    # Void gap — shared across all traces in this column
     gap = pg.LinearRegionItem(
         [0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None)
     )
@@ -150,53 +146,43 @@ def _make_cell(win, row: int, col: int, lead_name: str, fs: float,
     gap_wrap.setZValue(-25)
     plot.addItem(gap_wrap)
  
+    traces        = {}   # lead_name → PlotDataItem
+    sweep_buffers = {}   # lead_name → np.ndarray
+    baselines     = {}   # lead_name → float
+ 
+    for row_idx, lead_name in enumerate(lead_names_in_col):
+        base = _row_baseline(row_idx)
+        baselines[lead_name] = base
+ 
+        # Lead label
+        lbl = pg.TextItem(lead_name, color='#aaaaaa', anchor=(0, 1))
+        lbl.setPos(0.02, base + TRACE_HALF_MV)
+        plot.addItem(lbl)
+ 
+        sweep_buffers[lead_name] = np.full(cell_samples, np.nan, dtype=float)
+ 
+        if lead_name in available:
+            line = plot.plot(pen=pg.mkPen(color='#00ff88', width=1.0))
+            traces[lead_name] = line
+        else:
+            # N/A placeholder
+            na = pg.TextItem('N/A', color='#444444', anchor=(0.5, 0.5))
+            na.setPos(CELL_WINDOW_SEC / 2.0, base)
+            plot.addItem(na)
+ 
     return {
-        'plot':            plot,
-        'line':            line,
-        'gap_region':      gap,
-        'gap_region_wrap': gap_wrap,
-        'sweep_buffer':    np.full(window_samples, np.nan, dtype=float),
-        'write_pos':       0,
-        'window_samples':  window_samples,
-        'x_fixed':         np.arange(window_samples, dtype=float) / fs,
+        'plot':           plot,
+        'traces':         traces,
+        'sweep_buffers':  sweep_buffers,
+        'baselines':      baselines,
+        'gap':            gap,
+        'gap_wrap':       gap_wrap,
+        'cell_samples':   cell_samples,
+        'x_fixed':        x_fixed,
         'void_gap_length': 20,
+        'write_pos':      0,
         'first_sweep_done': False,
-        'cell_window_sec': cell_window_sec,
     }
- 
- 
-def _write_sample(cell: dict, sample: float):
-    '''Write one sample into a cell's circular sweep buffer.'''
-    pos    = cell['write_pos']
-    n      = cell['window_samples']
-    void   = cell['void_gap_length']
- 
-    cell['sweep_buffer'][pos] = sample
-    for i in range(1, void + 1):
-        cell['sweep_buffer'][(pos + i) % n] = np.nan
- 
-    old = pos
-    cell['write_pos'] = (pos + 1) % n
-    if cell['write_pos'] < old and not cell['first_sweep_done']:
-        cell['first_sweep_done'] = True
- 
- 
-def _update_cell(cell: dict, fs: float):
-    '''Redraw one cell's trace and void gap.'''
-    buf = cell['sweep_buffer'].copy()
-    cell['line'].setData(cell['x_fixed'], buf)
- 
-    cursor_x  = cell['write_pos'] / fs
-    gap_width = cell['void_gap_length'] / fs
-    gap_end   = cursor_x + gap_width
-    x_max     = cell['cell_window_sec']
- 
-    if gap_end <= x_max:
-        cell['gap_region'].setRegion((cursor_x, gap_end))
-        cell['gap_region_wrap'].setRegion((0, 0))
-    else:
-        cell['gap_region'].setRegion((cursor_x, x_max))
-        cell['gap_region_wrap'].setRegion((0, gap_end - x_max))
  
  
 # --------------------------------------------------------------------------- #
@@ -206,40 +192,40 @@ def _update_cell(cell: dict, fs: float):
 def setup_live_plot(app, fs: float, lead_names: list,
                     rolling_window_sec: float = 10.0) -> dict:
     '''
-    Initialise the 12-lead sweep display window.
+    Initialise the 12-lead sweep display.
  
     Args:
         app:               QApplication instance.
         fs:                Sampling frequency in Hz.
-        lead_names:        Lead names from the data source (raw, un-normalised).
+        lead_names:        Raw lead names from the data source.
         rolling_window_sec: Width of the rhythm strip in seconds.
  
     Returns:
         plot_state dict passed to every subsequent display call.
     '''
-    # Normalise incoming lead names so 'MLII' maps to 'II' etc.
-    normalised      = [_normalize_lead(n) for n in lead_names]
-    available_leads = set(normalised)
-    # lead_to_idx maps normalised lead name → index in sample_row
-    lead_to_idx     = {_normalize_lead(n): i for i, n in enumerate(lead_names)}
- 
-    # Resolve rhythm lead
-    rhythm_lead = RHYTHM_LEAD if RHYTHM_LEAD in available_leads else normalised[0]
+    normalised  = [_normalize_lead(n) for n in lead_names]
+    available   = set(normalised)
+    lead_to_idx = {_normalize_lead(n): i for i, n in enumerate(lead_names)}
+    rhythm_lead = RHYTHM_LEAD if RHYTHM_LEAD in available else normalised[0]
  
     win = pg.GraphicsLayoutWidget(show=True, title='ECG Continuous Sweep Monitor')
-    win.resize(1800, 700)
+    win.resize(1600, 900)
     win.setWindowTitle('ECG Continuous Sweep Monitor')
     win.setBackground('#000000')
     win.show()
     app.processEvents()
  
-    # Stretch: ECG columns share space equally; metrics column is narrower
-    for col in range(4):
-        win.ci.layout.setColumnStretchFactor(col, 4)
+    # 4 ECG columns + 1 metrics column
+    for c in range(4):
+        win.ci.layout.setColumnStretchFactor(c, 4)
     win.ci.layout.setColumnStretchFactor(4, 1)
  
-    # ---- Metrics panel — right column, spans all 4 rows ---- #
-    metrics_layout = win.addLayout(row=0, col=4, rowspan=4)
+    # Row stretch: ECG columns row taller than rhythm strip row
+    win.ci.layout.setRowStretchFactor(0, 3)
+    win.ci.layout.setRowStretchFactor(1, 1)
+ 
+    # ---- Metrics panel (col 4, spans both rows) ---- #
+    metrics_layout = win.addLayout(row=0, col=4, rowspan=2)
     metrics_layout.addLabel('HR', row=0, col=0, color='#888888', size='12pt')
     hr_value = metrics_layout.addLabel('--', row=1, col=0,
                                         color='#00ff00', size='42pt', bold=True)
@@ -253,40 +239,35 @@ def setup_live_plot(app, fs: float, lead_names: list,
     afib_label = metrics_layout.addLabel('', row=8, col=0,
                                           color='#ff4444', size='14pt', bold=True)
  
-    # ---- 12-lead grid (rows 0–2, cols 0–3) ---- #
-    cells = {}
-    for row_idx, row_leads in enumerate(GRID_LAYOUT):
-        for col_idx, lead_name in enumerate(row_leads):
-            cell = _make_cell(
-                win, row_idx, col_idx, lead_name,
-                fs, available_leads, CELL_WINDOW_SEC
-            )
-            cells[lead_name] = cell   # None if lead not present
+    # ---- Four column plots (row 0) ---- #
+    columns = []
+    for col_idx, col_leads in enumerate(COLUMNS):
+        col_state = _make_column(win, col_idx, col_leads, fs, available)
+        columns.append(col_state)
  
-    # ---- Rhythm strip (row 3, spanning cols 0–3) ---- #
-    rhythm_plot = win.addPlot(row=3, col=0, colspan=4)
+    # ---- Rhythm strip (row 1, colspan 4) ---- #
+    rhythm_samples = int(fs * rolling_window_sec)
+    x_fixed_rhythm = np.arange(rhythm_samples, dtype=float) / fs
+ 
+    rhythm_plot = win.addPlot(row=1, col=0, colspan=4)
     rhythm_plot.setMouseEnabled(x=False, y=False)
-    rhythm_plot.setYRange(*Y_RANGE)
     rhythm_plot.setXRange(0, rolling_window_sec)
-    rhythm_plot.setLabel('bottom', 'Time (seconds)')
+    rhythm_plot.setYRange(-2.0, 2.0)
     rhythm_plot.hideAxis('left')
-    rhythm_plot.setContentsMargins(0, 0, 0, 0)
- 
-    _draw_ecg_grid(rhythm_plot, rolling_window_sec, Y_RANGE)
-    rhythm_plot.setAspectLocked(True, ratio=SMALL_SQUARE_MV / SMALL_SQUARE_SEC)
- 
-    # Rhythm lead label
-    rlabel = pg.TextItem(f'{rhythm_lead}  (rhythm)', color='#aaaaaa', anchor=(0, 1))
-    rlabel.setPos(0.1, Y_RANGE[1])
-    rhythm_plot.addItem(rlabel)
+    rhythm_plot.setLabel('bottom', 'Time (seconds)')
  
     x_labels = np.arange(0, rolling_window_sec + 1.0, 1.0)
     rhythm_plot.getAxis('bottom').setTicks(
         [[(pos, f'{int(pos)}') for pos in x_labels]]
     )
  
-    rhythm_samples = int(fs * rolling_window_sec)
-    rhythm_line    = rhythm_plot.plot(pen=pg.mkPen(color='#00ff88', width=1.5))
+    _draw_ecg_grid(rhythm_plot, rolling_window_sec, -2.0, 2.0)
+ 
+    rlabel = pg.TextItem(f'{rhythm_lead}  (rhythm)', color='#aaaaaa', anchor=(0, 1))
+    rlabel.setPos(0.1, 1.9)
+    rhythm_plot.addItem(rlabel)
+ 
+    rhythm_line = rhythm_plot.plot(pen=pg.mkPen(color='#00ff88', width=1.5))
  
     scatter_r = pg.ScatterPlotItem(
         size=10, pen=pg.mkPen(None), brush=pg.mkBrush('#ff4444')
@@ -294,9 +275,8 @@ def setup_live_plot(app, fs: float, lead_names: list,
     rhythm_plot.addItem(scatter_r)
  
     cursor_line = rhythm_plot.addLine(
-        x=0, pen=pg.mkPen(color='#00aaff', width=2)
+        x=0, pen=pg.mkPen(color='#00aaff', width=1.5)
     )
-    cursor_line.setVisible(True)
  
     rhythm_gap = pg.LinearRegionItem(
         [0, 0], brush=pg.mkBrush('#000000'), movable=False, pen=pg.mkPen(None)
@@ -310,35 +290,30 @@ def setup_live_plot(app, fs: float, lead_names: list,
     rhythm_gap_wrap.setZValue(-25)
     rhythm_plot.addItem(rhythm_gap_wrap)
  
-    rhythm_state = {
-        'plot':            rhythm_plot,
-        'line':            rhythm_line,
-        'scatter_r':       scatter_r,
-        'cursor_line':     cursor_line,
-        'gap_region':      rhythm_gap,
-        'gap_region_wrap': rhythm_gap_wrap,
-        'sweep_buffer':    np.full(rhythm_samples, np.nan, dtype=float),
-        'write_pos':       0,
-        'window_samples':  rhythm_samples,
-        'x_fixed':         np.arange(rhythm_samples, dtype=float) / fs,
-        'void_gap_length': 80,
-        'first_sweep_done': False,
-        'cell_window_sec': rolling_window_sec,
-    }
- 
     return {
-        'win':              win,
-        'cells':            cells,
-        'rhythm':           rhythm_state,
-        'available_leads':  available_leads,
-        'lead_to_idx':      lead_to_idx,
-        'rhythm_lead':      rhythm_lead,
+        'win':                win,
+        'columns':            columns,
+        'rhythm_plot':        rhythm_plot,
+        'rhythm_line':        rhythm_line,
+        'rhythm_buffer':      np.full(rhythm_samples, np.nan, dtype=float),
+        'rhythm_write_pos':   0,
+        'rhythm_samples':     rhythm_samples,
+        'x_fixed_rhythm':     x_fixed_rhythm,
+        'rhythm_void_length': 80,
+        'rhythm_first_done':  False,
+        'scatter_r':          scatter_r,
+        'cursor_line':        cursor_line,
+        'rhythm_gap':         rhythm_gap,
+        'rhythm_gap_wrap':    rhythm_gap_wrap,
         'rolling_window_sec': rolling_window_sec,
-        'first_sweep_done': False,
-        'hr_value':         hr_value,
-        'rmssd_value':      rmssd_value,
-        'afib_label':       afib_label,
-        'fs':               fs,
+        'available':          available,
+        'lead_to_idx':        lead_to_idx,
+        'rhythm_lead':        rhythm_lead,
+        'first_sweep_done':   False,
+        'hr_value':           hr_value,
+        'rmssd_value':        rmssd_value,
+        'afib_label':         afib_label,
+        'fs':                 fs,
     }
  
  
@@ -348,29 +323,56 @@ def setup_live_plot(app, fs: float, lead_names: list,
  
 def append_plot_sample(plot_state: dict, sample_row: np.ndarray):
     '''
-    Write one sample row into all active cell buffers and the rhythm buffer.
+    Write one sample row into all column sweep buffers and the rhythm buffer.
  
     Args:
-        plot_state:  State dict from setup_live_plot.
-        sample_row:  Shape (n_leads,) — simultaneous voltages for all leads.
+        sample_row: Shape (n_leads,) — simultaneous voltages in mV.
     '''
     lead_to_idx = plot_state['lead_to_idx']
- 
-    # Write to each active grid cell
-    for lead_name, cell in plot_state['cells'].items():
-        if cell is None:
-            continue
-        if lead_name not in lead_to_idx:
-            continue
-        _write_sample(cell, float(sample_row[lead_to_idx[lead_name]]))
- 
-    # Write to rhythm strip
+    available   = plot_state['available']
     rhythm_lead = plot_state['rhythm_lead']
+ 
+    # ---- Write to each column ---- #
+    for col_state in plot_state['columns']:
+        pos  = col_state['write_pos']
+        n    = col_state['cell_samples']
+        void = col_state['void_gap_length']
+ 
+        for lead_name, buf in col_state['sweep_buffers'].items():
+            if lead_name not in available:
+                continue
+            idx = lead_to_idx.get(lead_name)
+            if idx is None or idx >= len(sample_row):
+                continue
+            val  = float(sample_row[idx]) + col_state['baselines'][lead_name]
+            buf[pos] = val
+            for j in range(1, void + 1):
+                buf[(pos + j) % n] = np.nan
+ 
+        old = pos
+        col_state['write_pos'] = (pos + 1) % n
+        if col_state['write_pos'] < old and not col_state['first_sweep_done']:
+            col_state['first_sweep_done'] = True
+ 
+    # ---- Write to rhythm strip ---- #
+    rpos  = plot_state['rhythm_write_pos']
+    rn    = plot_state['rhythm_samples']
+    rvoid = plot_state['rhythm_void_length']
+    rbuf  = plot_state['rhythm_buffer']
+ 
     if rhythm_lead in lead_to_idx:
-        rhythm = plot_state['rhythm']
-        _write_sample(rhythm, float(sample_row[lead_to_idx[rhythm_lead]]))
-        if rhythm['first_sweep_done'] and not plot_state['first_sweep_done']:
-            plot_state['first_sweep_done'] = True
+        idx = lead_to_idx[rhythm_lead]
+        if idx < len(sample_row):
+            rbuf[rpos] = float(sample_row[idx])
+            for j in range(1, rvoid + 1):
+                rbuf[(rpos + j) % rn] = np.nan
+ 
+    old_rpos = rpos
+    plot_state['rhythm_write_pos'] = (rpos + 1) % rn
+    if (plot_state['rhythm_write_pos'] < old_rpos
+            and not plot_state['rhythm_first_done']):
+        plot_state['rhythm_first_done'] = True
+        plot_state['first_sweep_done']  = True
  
  
 # --------------------------------------------------------------------------- #
@@ -386,58 +388,59 @@ def update_live_plot(plot_state: dict,
                      afib_status: Optional[str]     = None,
                      afib_confidence: Optional[str] = None):
     '''
-    Render one display frame — updates all 12 cells and the rhythm strip.
+    Render one display frame — updates all column plots and the rhythm strip.
  
     All clinical values are pre-computed upstream and passed in.
-    This function only draws.
- 
-    Args:
-        plot_state:      State dict from setup_live_plot.
-        fs:              Sampling frequency in Hz.
-        total_samples:   Total samples written so far (monotonically increasing).
-        r_peaks:         Global R-peak indices (from processor.all_r_peaks).
-        hr:              Heart rate in bpm, or None.
-        rmssd:           RMSSD in ms, or None.
-        afib_status:     'detected' | 'possible' | 'suspected' | 'normal' | None
-        afib_confidence: 'high' | 'medium' | 'low' | None
     '''
-    # ---- Update all 12 grid cells ---- #
-    for cell in plot_state['cells'].values():
-        if cell is not None:
-            _update_cell(cell, fs)
+    # ---- Update each column ---- #
+    for col_state in plot_state['columns']:
+        for lead_name, line in col_state['traces'].items():
+            line.setData(col_state['x_fixed'],
+                         col_state['sweep_buffers'][lead_name])
+ 
+        # Void gap per column
+        cursor_x  = col_state['write_pos'] / fs
+        gap_width = col_state['void_gap_length'] / fs
+        gap_end   = cursor_x + gap_width
+        x_max     = CELL_WINDOW_SEC
+ 
+        if gap_end <= x_max:
+            col_state['gap'].setRegion((cursor_x, gap_end))
+            col_state['gap_wrap'].setRegion((0, 0))
+        else:
+            col_state['gap'].setRegion((cursor_x, x_max))
+            col_state['gap_wrap'].setRegion((0, gap_end - x_max))
  
     # ---- Rhythm strip ---- #
-    rhythm         = plot_state['rhythm']
-    rhythm_buf     = rhythm['sweep_buffer'].copy()
-    rhythm_samples = rhythm['window_samples']
+    rhythm_buf = plot_state['rhythm_buffer']
+    plot_state['rhythm_line'].setData(plot_state['x_fixed_rhythm'], rhythm_buf)
  
-    rhythm['line'].setData(rhythm['x_fixed'], rhythm_buf)
- 
-    cursor_x  = rhythm['write_pos'] / fs
-    gap_width = rhythm['void_gap_length'] / fs
+    cursor_x  = plot_state['rhythm_write_pos'] / fs
+    gap_width = plot_state['rhythm_void_length'] / fs
     gap_end   = cursor_x + gap_width
     x_max     = plot_state['rolling_window_sec']
  
-    rhythm['cursor_line'].setValue(cursor_x)
+    plot_state['cursor_line'].setValue(cursor_x)
  
     if gap_end <= x_max:
-        rhythm['gap_region'].setRegion((cursor_x, gap_end))
-        rhythm['gap_region_wrap'].setRegion((0, 0))
+        plot_state['rhythm_gap'].setRegion((cursor_x, gap_end))
+        plot_state['rhythm_gap_wrap'].setRegion((0, 0))
     else:
-        rhythm['gap_region'].setRegion((cursor_x, x_max))
-        rhythm['gap_region_wrap'].setRegion((0, gap_end - x_max))
+        plot_state['rhythm_gap'].setRegion((cursor_x, x_max))
+        plot_state['rhythm_gap_wrap'].setRegion((0, gap_end - x_max))
  
-    # ---- Suppress markers before first full sweep ---- #
+    # ---- Suppress markers during calibration ---- #
     if not plot_state['first_sweep_done']:
-        rhythm['scatter_r'].setData([], [])
+        plot_state['scatter_r'].setData([], [])
         plot_state['afib_label'].setText(
             'CALIBRATING...', color='#888888', size='12pt', bold=False
         )
         return
  
     # ---- R-peak markers on rhythm strip only ---- #
-    window_start = total_samples - rhythm_samples
-    visible      = [p for p in r_peaks if p >= window_start]
+    rhythm_samples = plot_state['rhythm_samples']
+    window_start   = total_samples - rhythm_samples
+    visible        = [p for p in r_peaks if p >= window_start]
  
     r_x, r_y = [], []
     for p in visible[-15:]:
@@ -447,7 +450,7 @@ def update_live_plot(plot_state: dict,
             r_x.append(buf_idx / fs)
             r_y.append(val)
  
-    rhythm['scatter_r'].setData(r_x, r_y)
+    plot_state['scatter_r'].setData(r_x, r_y)
  
     # ---- HR ---- #
     if hr is not None:
