@@ -59,20 +59,18 @@ def compute_rmssd(r_peak_indices, fs: float) -> float:
     return float(np.sqrt(np.mean(successive_diffs ** 2)))
  
  
-def compute_metrics(r_peak_indices, fs: float) -> dict:
-    '''
-    Compute all real-time clinical metrics in a single call.
- 
-    This is the primary entry point for main.py — call this once per
-    display frame and pass the results to display.py.
- 
-    Returns:
-        hr:    int | None   — heart rate in bpm
-        rmssd: float | None — RMSSD in ms, or None if insufficient data
-    '''
+def compute_metrics(r_peak_indices, fs: float,
+                    total_samples: int = 0,
+                    window_samples: int = 3600) -> dict:
     peaks = list(r_peak_indices)
     hr    = compute_hr(peaks, fs)
-    rmssd = compute_rmssd(peaks, fs)
+
+    # RMSSD from current display window only — prevents loop boundary
+    # artifacts from inflating the metric across session history
+    window_start   = total_samples - window_samples
+    window_peaks   = [p for p in peaks if p >= window_start]
+    rmssd          = compute_rmssd(window_peaks, fs)
+
     return {
         'hr':    hr,
         'rmssd': rmssd if not np.isnan(rmssd) else None,

@@ -220,12 +220,18 @@ try:
                         data_iter = data_generator()  # Reset generator if exhausted
                         sample_dict = next(data_iter, None)
                         if sample_dict is None:
-                            timer.stop()
-                            return
+                            data_iter = data_generator()
+                            processor['all_r_peaks'].clear()
+                            processor['dedup_r_peaks'].clear()
+                            processor['threshold_state'].reset()
+                            sample_dict = next(data_iter, None)
+                            if sample_dict is None:
+                                timer.stop()
+                                return
                     _process_sample(sample_dict)
  
                 peaks                        = processor['all_r_peaks']
-                metrics                      = compute_metrics(peaks, fs)
+                metrics                      = compute_metrics(peaks, fs, total_samples=sample_count, window_samples=live_plot_state['rhythm_samples'])
                 afib_status, afib_confidence = afib_detector.update(peaks, fs)
  
                 update_live_plot(

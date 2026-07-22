@@ -536,12 +536,19 @@ def update_live_plot(plot_state: dict,
     visible        = [p for p in r_peaks if p >= window_start]
  
     r_x, r_y = [], []
+    snap_radius = int(0.040 * fs)  # ±40ms snap window
     for p in visible[-15:]:
         buf_idx = p % rhythm_samples
-        val     = plot_state['rhythm_buffer'][buf_idx]   # raw value
+        lo = max(0, buf_idx - snap_radius)
+        hi = min(rhythm_samples, buf_idx + snap_radius + 1)
+        window = rhythm_buf[lo:hi]
+        if np.all(np.isnan(window)):
+            continue
+        local_max = lo + int(np.nanargmax(window))
+        val = rhythm_buf[local_max]
         if not np.isnan(val):
-            r_x.append(buf_idx / fs)
-            r_y.append(val + _RHYTHM_BASE_Y)              # apply same offset
+            r_x.append(local_max / fs)
+            r_y.append(val)
  
     plot_state['scatter_r'].setData(r_x, r_y)
  
