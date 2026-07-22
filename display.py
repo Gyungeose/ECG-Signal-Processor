@@ -133,10 +133,10 @@ SMALL_SQUARE_MV  = 0.1
  
 X_LINE_PEN_004S  = pg.mkPen(color='#555555', width=0.4)
 X_LINE_PEN_02S   = pg.mkPen(color="#888888", width=0.6)
-X_LINE_PEN_1S    = pg.mkPen(color="#888888", width=1.2)
+X_LINE_PEN_1S    = pg.mkPen(color="#888888", width=1.0)
+X_LINE_PEN_25S   = pg.mkPen(color="#888888", width=1.5)
 Y_LINE_PEN_MINOR = pg.mkPen(color='#555555', width=0.4)
 Y_LINE_PEN_MAJOR = pg.mkPen(color='#888888', width=0.6)
- 
  
 def _draw_ecg_grid(plot, x_max: float, y_min: float, y_max: float):
     '''Dual-weight ECG-paper grid. Integer line-count avoids float drift.'''
@@ -144,7 +144,7 @@ def _draw_ecg_grid(plot, x_max: float, y_min: float, y_max: float):
     for i in range(n_x):
         x    = i * SMALL_SQUARE_SEC
         
-        pen = X_LINE_PEN_1S if (i % 25 == 0) else (X_LINE_PEN_02S if (i % 5 == 0) else X_LINE_PEN_004S)
+        pen = X_LINE_PEN_25S if (i % 62.5 == 0) else (X_LINE_PEN_1S if (i % 25 == 0) else (X_LINE_PEN_02S if (i % 5 == 0) else X_LINE_PEN_004S))
         
         line = pg.InfiniteLine(pos=x, angle=90, pen=pen)
         line.setZValue(-20)

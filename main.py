@@ -90,29 +90,29 @@ choice = select_data_source()
  
 if choice == 1:
     print('\n[SYN] Synthetic ECG — 30s at 360 Hz, 72 bpm')
-    data_generator = stream_synthetic(fs=360.0, duration=30.0, heart_rate=72)
+    data_generator = lambda: stream_synthetic(fs=360.0, duration=30.0, heart_rate=72)
     source_name    = 'Synthetic ECG'
  
 elif choice == 2:
     record = os.path.splitext(input('  MIT-BIH record path: ').strip())[0]
-    data_generator = stream_mitbih(record)
+    data_generator = lambda: stream_mitbih(record)
     source_name    = f'MIT-BIH: {record}'
 
 elif choice == 3:
     record = os.path.splitext(input('  PTB-XL record path: ').strip())[0]
-    data_generator = stream_ptbxl(record)
+    data_generator = lambda: stream_ptbxl(record)
     source_name    = f'PTB-XL: {record}'
 
 elif choice == 4:
     record = os.path.splitext(input('  Chapman record path: ').strip())[0]
-    data_generator = stream_chapman(record)
+    data_generator = lambda: stream_chapman(record)
     source_name    = f'Chapman-Shaoxing: {record}'
  
 elif choice == 5:
     filepath = input('  CSV file path: ').strip()
     fs_str   = input('  Sampling frequency Hz (Enter for 360): ').strip()
     fs_csv   = float(fs_str) if fs_str else 360.0
-    data_generator = stream_from_csv(filepath, fs=fs_csv)
+    data_generator = lambda: stream_from_csv(filepath, fs=fs_csv)
     source_name    = f'CSV: {filepath}'
  
 elif choice == 6:
@@ -139,7 +139,7 @@ else:
 # Peek at the first sample to learn n_leads, lead_names, and fs.
 # The generator is not reset — the first sample is processed normally.
  
-data_iter  = iter(data_generator)
+data_iter  = data_generator()
 first_dict = next(data_iter, None)
 if first_dict is None:
     print('[ERR] Data source yielded no samples.')
@@ -212,13 +212,16 @@ try:
     if HAS_PYQTGRAPH and live_plot_state is not None:
  
         def process_tick():
-            global sample_count, chunk_count
+            global sample_count, chunk_count, data_iter
             try:
                 for _ in range(6):
                     sample_dict = next(data_iter, None)
                     if sample_dict is None:
-                        timer.stop()
-                        return
+                        data_iter = data_generator()  # Reset generator if exhausted
+                        sample_dict = next(data_iter, None)
+                        if sample_dict is None:
+                            timer.stop()
+                            return
                     _process_sample(sample_dict)
  
                 peaks                        = processor['all_r_peaks']
