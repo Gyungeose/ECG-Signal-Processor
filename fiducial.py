@@ -65,6 +65,16 @@ T_RR_FRACTION     = 0.70   # don't search past 70% of mean RR (avoids next beat)
 # Leads with normally inverted (negative) T waves
 _INVERTED_T_LEADS = {'aVR'}
  
+# P wave search bounds relative to the current R-peak
+# Lower bound: previous_R + P_RR_LOWER_FRACTION × RR — clears the T wave
+# Upper bound: current_R  - P_SEARCH_END_MS        — clears the PR segment
+P_RR_LOWER_FRACTION = 0.60   # search starts at 60% of the way through the RR
+P_SEARCH_END_MS     = 50.0   # stop 50ms before R (minimum physiological PR)
+P_MIN_WINDOW_MS     = 40.0   # minimum viable search window
+ 
+# Leads with normally inverted (negative) P waves
+_INVERTED_P_LEADS = {'aVR'}
+ 
  
 # --------------------------------------------------------------------------- #
 #  Utilities                                                                    #
@@ -209,6 +219,85 @@ def find_t_wave(display_signal: np.ndarray, r_idx: int, fs: float,
  
  
 # --------------------------------------------------------------------------- #
+#  P wave                                                                       #
+# --------------------------------------------------------------------------- #
+ 
+def find_p_wave(display_signal: np.ndarray, r_idx: int, fs: float,
+                mean_rr_ms: float,
+                prev_r_idx: Optional[int] = None,
+                lead_id: str = 'II') -> Optional[int]:
+    '''
+    Locate the P wave peak in the inter-beat space before the R-peak.
+ 
+    P wave sits between the previous beat's T wave and the current QRS onset.
+    The search window is:
+ 
+        lower bound — prev_R + 60% of RR interval
+                      This clears the T wave of the previous beat, which
+                      ends roughly at 40-50% of the RR interval.
+ 
+        upper bound — current_R - P_SEARCH_END_MS (50ms)
+                      Clears the PR segment and QRS onset. 50ms is the
+                      minimum physiological PR interval.
+ 
+    If no previous R-peak is available (first beat in the session), the
+    lower bound falls back to current_R - mean_rr_ms, using the population
+    mean RR as a stand-in for the missing previous beat location.
+ 
+    Returns None if:
+        - the search window is too narrow (< P_MIN_WINDOW_MS)
+        - the window falls outside signal bounds
+        - the window contains only NaN
+ 
+    Polarity:
+        aVR           → argmin (normally inverted P wave)
+        all other leads → argmax (normally upright P wave)
+ 
+    Args:
+        display_signal: Display-filtered signal (0.5-40 Hz).
+        r_idx:          Current R-peak sample index.
+        fs:             Sampling frequency (Hz).
+        mean_rr_ms:     Patient's mean RR interval in ms.
+        prev_r_idx:     Previous R-peak sample index, or None if unavailable.
+        lead_id:        Lead name — determines P wave polarity assumption.
+ 
+    Returns:
+        Sample index of the P wave peak, or None.
+    '''
+    # Establish the lower bound anchor
+    if prev_r_idx is not None:
+        actual_rr_ms = (r_idx - prev_r_idx) / fs * 1000.0
+        lo_offset_ms = actual_rr_ms * P_RR_LOWER_FRACTION
+        lo = prev_r_idx + _ms_to_samples(lo_offset_ms, fs)
+    else:
+        # No previous beat known — estimate using mean RR
+        lo = r_idx - _ms_to_samples(mean_rr_ms * (1.0 - P_RR_LOWER_FRACTION), fs)
+ 
+    hi = r_idx - _ms_to_samples(P_SEARCH_END_MS, fs)
+ 
+    # Clamp to signal bounds
+    lo = max(0, lo)
+    hi = min(len(display_signal), hi)
+ 
+    # Reject windows that are too narrow to reliably contain a P wave
+    window_ms = (hi - lo) / fs * 1000.0
+    if window_ms < P_MIN_WINDOW_MS or hi <= lo:
+        return None
+ 
+    window = display_signal[lo:hi]
+ 
+    if np.all(np.isnan(window)):
+        return None
+ 
+    if lead_id in _INVERTED_P_LEADS:
+        local_idx = int(np.nanargmin(window))
+    else:
+        local_idx = int(np.nanargmax(window))
+ 
+    return lo + local_idx
+ 
+ 
+# --------------------------------------------------------------------------- #
 #  Combined per-beat call                                                       #
 # --------------------------------------------------------------------------- #
  
@@ -236,6 +325,52 @@ def find_qst_points(display_signal: np.ndarray, r_idx: int, fs: float,
     '''
     return {
         'q_idx': find_q_point(display_signal, r_idx, fs, mean_qrs_width_ms),
+        's_idx': find_s_point(display_signal, r_idx, fs, mean_qrs_width_ms),
+        't_idx': find_t_wave(display_signal, r_idx, fs, mean_rr_ms,
+                              mean_qrs_width_ms, lead_id),
+    }
+ 
+ 
+def find_all_fiducial_points(display_signal: np.ndarray, r_idx: int, fs: float,
+                              mean_rr_ms: float,
+                              mean_qrs_width_ms: float = NORMAL_QRS_WIDTH_MS,
+                              prev_r_idx: Optional[int] = None,
+                              lead_id: str = 'II') -> dict:
+    '''
+    Locate all fiducial points — P, Q, S, T — for a single beat.
+ 
+    This is the primary entry point for features.py. Call once per confirmed
+    R-peak per lead. The returned indices are in terms of the display_signal
+    array passed in — the caller is responsible for converting to global
+    sample indices if needed.
+ 
+    Args:
+        display_signal:    Display-filtered signal array (0.5-40 Hz).
+        r_idx:             Confirmed R-peak sample index (local to array).
+        fs:                Sampling frequency (Hz).
+        mean_rr_ms:        Patient's mean RR interval in ms.
+                           Pass threshold_state.get_expected_rr_interval().
+        mean_qrs_width_ms: Patient's mean QRS width in ms.
+                           Pass threshold_state.get_mean_qrs_width_ms(fs).
+        prev_r_idx:        Previous R-peak sample index, or None for the
+                           first beat. Required for P wave search anchoring.
+        lead_id:           Standard lead name — drives polarity decisions
+                           for P and T waves (e.g. aVR inverts both).
+ 
+    Returns:
+        {
+            'p_idx': int | None,   — P wave peak
+            'q_idx': int | None,   — Q wave trough
+            'r_idx': int,          — R-peak (echo of input, for convenience)
+            's_idx': int | None,   — S wave trough
+            't_idx': int | None,   — T wave peak
+        }
+    '''
+    return {
+        'p_idx': find_p_wave(display_signal, r_idx, fs, mean_rr_ms,
+                              prev_r_idx, lead_id),
+        'q_idx': find_q_point(display_signal, r_idx, fs, mean_qrs_width_ms),
+        'r_idx': r_idx,
         's_idx': find_s_point(display_signal, r_idx, fs, mean_qrs_width_ms),
         't_idx': find_t_wave(display_signal, r_idx, fs, mean_rr_ms,
                               mean_qrs_width_ms, lead_id),
